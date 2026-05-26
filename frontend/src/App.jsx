@@ -3,6 +3,7 @@ import { api } from './api/client'
 import LeadList from './components/LeadList'
 import AgentStream from './components/AgentStream'
 import EmailEditor from './components/EmailEditor'
+import ChatPanel from './components/ChatPanel'
 
 export default function App() {
   const [leads, setLeads] = useState([])
@@ -27,10 +28,7 @@ export default function App() {
     setDrafts(d)
   }, [])
 
-  useEffect(() => {
-    refreshLeads()
-  }, [refreshLeads])
-
+  useEffect(() => { refreshLeads() }, [refreshLeads])
   useEffect(() => {
     refreshDrafts(selectedId)
     setEvents([])
@@ -82,14 +80,15 @@ export default function App() {
   }
 
   return (
-    <div className="app">
+    <div className="app app-phase2">
+      {/* sidebar */}
       <aside className="sidebar">
         <div className="sidebar-header">
           <div className="brand">
             <span className="brand-dot"></span>
-            <span>Sales agent</span>
+            <span>Agent team</span>
           </div>
-          <div className="brand-sub">Phase 1 · local · ollama</div>
+          <div className="brand-sub">Phase 2 · multi-agent · ollama</div>
         </div>
 
         <div className="sidebar-actions">
@@ -105,18 +104,15 @@ export default function App() {
           </button>
         </div>
 
-        <LeadList
-          leads={leads}
-          selectedId={selectedId}
-          onSelect={setSelectedId}
-        />
+        <LeadList leads={leads} selectedId={selectedId} onSelect={setSelectedId} />
       </aside>
 
+      {/* center — lead detail (Phase 1) */}
       <main className="main">
         {!selectedLead ? (
           <div className="empty">
             <div style={{ fontSize: 32 }}>📬</div>
-            <div>Pick a lead from the left to start</div>
+            <div>Pick a lead, or use the chat on the right.</div>
           </div>
         ) : (
           <>
@@ -149,7 +145,7 @@ export default function App() {
 
               {drafts.length === 0 ? (
                 <div className="dim" style={{ textAlign: 'center', padding: 24 }}>
-                  No drafts yet. Click "Draft email" above.
+                  No drafts yet.
                 </div>
               ) : (
                 drafts.map((d) => (
@@ -165,6 +161,9 @@ export default function App() {
           </>
         )}
       </main>
+
+      {/* right — chat with manager (Phase 2) */}
+      <ChatPanel />
     </div>
   )
 }
