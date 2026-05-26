@@ -1,141 +1,118 @@
-# Phase 1 — Local Sales Agent (single-agent vertical slice)
+# Phase 2 — Multi-agent team (manager + 3 devs + analyst + sales)
 
-A working sales agent that finds leads, drafts personalized cold emails, and logs follow-ups. Runs 100% locally — no API costs.
+Builds on Phase 1. Same Postgres, same Ollama, same FastAPI app. Adds:
 
-## Architecture
+- **Manager agent** (supervisor) — decomposes user requests into subtasks, routes to specialists, synthesizes results
+- **Dev agents x3** — backend, frontend, QA — each with its own tools and system prompt
+- **Social analyst** — Facebook + Instagram trend analysis (mocked APIs, ready for real Meta Graph API later)
+- **Sales agent** — your Phase 1 agent, now a worker the manager can call
+- **Task queue** — every agent action goes through a Postgres table so runs are replayable and auditable
+- **Chat UI** — talk to the manager in natural language; watch each subtask stream live
 
-```
-React (Vite)  ──HTTP/SSE──▶  FastAPI  ──▶  LangGraph agent  ──▶  Ollama (local LLM)
-                                │
-                                └──▶  PostgreSQL (leads, emails, runs)
-```
+## How to apply Phase 2 on top of Phase 1
 
-## Prerequisites — install these first
-
-| Tool | Version | Link |
-|------|---------|------|
-| Python | 3.11+ | https://www.python.org/downloads/ |
-| Node.js | 20+ | https://nodejs.org/en/download |
-| Docker Desktop | latest | https://www.docker.com/products/docker-desktop/ |
-| Ollama | latest | https://ollama.com/download |
-| Git | latest | https://git-scm.com/downloads |
-
-Verify each:
-```bash
-python --version    # 3.11.x or higher
-node --version      # v20.x or higher
-docker --version    # any recent
-ollama --version    # any recent
-```
-
-## Step 1 — Pull the LLM models
+This zip contains **only the new/changed files**. Copy them over your existing Phase 1 directory — nothing in Phase 1 gets deleted, only added to.
 
 ```bash
-ollama pull llama3.1:8b        # main reasoning model (~4.7GB)
-ollama pull qwen2.5:7b         # backup, better at structured output (~4.4GB)
+# Assuming your Phase 1 lives in ~/projects/phase1
+cd ~/projects/phase1
+
+# Unzip phase 2 over it (will only add new files + replace main.py, App.jsx, sales_agent.py)
+unzip -o ~/Downloads/phase2-multiagent.zip
 ```
 
-Test it works:
-```bash
-ollama run llama3.1:8b "write a one-line sales pitch for a CRM"
-```
+Files changed from Phase 1:
+- `backend/app/main.py` (adds new routes, keeps old ones)
+- `backend/app/agents/sales_agent.py` (refactored to be a callable worker, **plus** the original endpoints still work)
+- `backend/requirements.txt` (no new deps actually — same versions work)
+- `frontend/src/App.jsx` (adds chat panel)
+- `frontend/src/styles.css` (adds chat styles)
 
-Keep Ollama running in the background — it serves at `http://localhost:11434`.
+Files added:
+- `backend/app/agents/manager.py` — supervisor agent + LangGraph orchestrator
+- `backend/app/agents/dev_backend.py`
+- `backend/app/agents/dev_frontend.py`
+- `backend/app/agents/dev_qa.py`
+- `backend/app/agents/social_analyst.py`
+- `backend/app/agents/base.py` — shared worker contract
+- `backend/app/agents/registry.py` — agent lookup + capabilities
+- `backend/app/tools/dev_tools.py` — sandboxed code/spec tools
+- `backend/app/tools/social_tools.py` — mocked FB/IG trend data
+- `backend/app/tools/task_queue.py` — Postgres task queue
+- `backend/app/db/migrate_phase2.py` — adds new tables, keeps Phase 1 data
+- `frontend/src/components/ChatPanel.jsx`
+- `frontend/src/components/TaskKanban.jsx`
+- `frontend/src/components/AgentBadge.jsx`
 
-## Step 2 — Start PostgreSQL via Docker
+## Steps to run Phase 2
 
-From the project root:
-```bash
-docker compose up -d
-```
+1. Stop Phase 1 backend if running (`Ctrl+C` the uvicorn process). Frontend can stay.
+2. Make sure Postgres + Ollama are still up: `docker compose ps`, `ollama list`.
+3. Pull one more model for the manager (better tool calling): `ollama pull qwen2.5:7b` — already in your Phase 1 list but skip if you skipped it then.
+4. Apply migrations (additive, won't drop Phase 1 data):
+   ```bash
+   cd backend
+   source venv/bin/activate
+   python -m app.db.migrate_phase2
+   ```
+5. Restart backend: `uvicorn app.main:app --reload --port 8000`
+6. Frontend: `npm run dev` (or refresh if already running)
+7. Open http://localhost:5173 — you'll now see a chat panel on the right side.
 
-This starts Postgres on port 5432 with database `salesagent`, user `agent`, password `agentpass`. Data persists in a Docker volume.
+## Try these prompts in the chat
 
-Verify:
-```bash
-docker compose ps    # should show postgres "running"
-```
+- "Draft cold emails for everyone in fintech"
+- "What's trending on Instagram for B2B SaaS this week?"
+- "Spec out a backend endpoint for tracking email opens"
+- "Find 3 new leads in healthtech, then draft an outreach for each"
+- "Review the lead status workflow for issues"
 
-## Step 3 — Backend setup
+The manager decides which agents to call, runs them, and shows you everything in the kanban.
 
-```bash
-cd backend
-python -m venv venv
-source venv/bin/activate          # Windows: venv\Scripts\activate
-pip install -r requirements.txt
-python -m app.db.init_db          # creates tables + seeds 5 demo leads
-uvicorn app.main:app --reload --port 8000
-```
-
-Backend now running at http://localhost:8000. API docs at http://localhost:8000/docs.
-
-## Step 4 — Frontend setup
-
-In a new terminal:
-```bash
-cd frontend
-npm install
-npm run dev
-```
-
-Frontend at http://localhost:5173.
-
-## Usage
-
-1. Open http://localhost:5173
-2. You'll see 5 seeded leads
-3. Click "Draft email" on any lead → watch the agent stream its reasoning + final email
-4. Edit the email if you want, click "Send" → logs the outreach with status `sent` (no real email goes out — uses a mock sender)
-5. Click "Find more leads" → agent generates 3 new fictional leads matching a criteria you provide
-
-## Project structure
+## How the supervisor pattern works
 
 ```
-phase1/
-├── docker-compose.yml         # Postgres
-├── backend/
-│   ├── requirements.txt
-│   └── app/
-│       ├── main.py            # FastAPI app, routes, SSE streaming
-│       ├── config.py          # env vars
-│       ├── db/
-│       │   ├── models.py      # SQLAlchemy: Lead, EmailDraft, AgentRun
-│       │   └── init_db.py     # create tables + seed
-│       ├── agents/
-│       │   └── sales_agent.py # LangGraph state machine
-│       └── tools/
-│           ├── lead_tools.py  # search_leads, generate_leads
-│           ├── email_tools.py # draft_email, send_email (mocked)
-│           └── crm_tools.py   # log_followup
-└── frontend/
-    ├── package.json
-    ├── vite.config.js
-    ├── index.html
-    └── src/
-        ├── main.jsx
-        ├── App.jsx
-        ├── api/client.js
-        └── components/
-            ├── LeadList.jsx
-            ├── AgentStream.jsx
-            └── EmailEditor.jsx
+                user message
+                     │
+                     ▼
+              ┌──────────────┐
+              │   manager    │  decomposes into tasks
+              └──────┬───────┘  picks workers + parallelism
+                     │
+        ┌────────────┼────────────┬────────────┐
+        ▼            ▼            ▼            ▼
+   [sales]    [dev_backend]   [analyst]    [dev_qa]
+        │            │            │            │
+        └────────────┴────────────┴────────────┘
+                     │
+                     ▼
+              ┌──────────────┐
+              │  aggregator  │  manager re-enters
+              └──────┬───────┘  to synthesize results
+                     │
+                     ▼
+              streamed answer
 ```
 
-## What's wired up vs faked
+The manager calls a single LLM with strict JSON output to produce a task plan:
+```json
+{
+  "tasks": [
+    {"id": "t1", "agent": "sales", "action": "draft_email", "input": {...}, "depends_on": []},
+    {"id": "t2", "agent": "social_analyst", "action": "trend_report", "input": {...}, "depends_on": []},
+    {"id": "t3", "agent": "dev_qa", "action": "review", "input": {...}, "depends_on": ["t1"]}
+  ]
+}
+```
 
-- **Real**: agent loop, tool calls, LLM via Ollama, DB persistence, SSE streaming, React UI
-- **Faked (intentionally — wire real later)**: email sending logs to DB only, lead "search" is mocked since web scraping needs real credentials
+Tasks with no `depends_on` run in parallel via `asyncio.gather`. The DAG executor handles the rest.
 
-## Phase 2 preview
+## What's deliberately faked
 
-This codebase is built so Phase 2 (manager + dev agents + analyst) drops in cleanly:
-- `agents/` folder takes new agent modules
-- The LangGraph supervisor pattern is one node away from being added
-- The `AgentRun` model already tracks `parent_run_id` for multi-agent traces
+- **Dev agents don't execute code**. They produce specs, diffs, and review notes. Real code execution is a Phase 4 concern (sandboxing, security).
+- **Social analyst** returns mock trend data from `social_tools.py`. Wire to real Meta Graph API in Phase 5.
+- **Manager doesn't call itself recursively** yet. Single-level decomposition. Recursive planning is Phase 4.
 
-## Troubleshooting
+## Phase 3 preview
 
-- **Ollama connection refused**: ensure `ollama serve` is running (Docker Desktop user? Ollama installs as a service on macOS/Windows and starts automatically. On Linux: `systemctl start ollama`)
-- **Postgres connection refused**: check `docker compose ps` and `docker compose logs postgres`
-- **Slow first response**: first call to Ollama loads the model into RAM (~10s on first run, then fast)
-- **Out of memory**: close Chrome tabs. `llama3.1:8b` needs ~6GB free RAM. If tight, use `phi3:mini` instead (edit `backend/app/config.py`)
+Phase 3 wraps this with users, companies, auth, and a proper dashboard. The `chat_sessions` table already has a nullable `user_id` and `company_id` — Phase 3 just fills those in.
