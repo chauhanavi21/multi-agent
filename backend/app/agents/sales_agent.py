@@ -1,203 +1,191 @@
-"""Sales agent built as a LangGraph state machine.
+"""Sales agent (Phase 1 logic, refactored to be a callable worker).
 
-Flow:
-  start → plan → execute → finalize → end
-
-Each node yields events that get streamed to the frontend via SSE.
-This same pattern scales to multi-agent in Phase 2: add a 'route' node
-that picks which specialist handles the task.
+Public surface:
+  - SalesWorker        -> the new Worker the manager calls
+  - run_agent(...)     -> kept for backward compat with Phase 1 endpoints
 """
+from __future__ import annotations
 import json
-from typing import TypedDict, Literal, Optional
-from langchain_ollama import ChatOllama
+import asyncio
+from typing import AsyncGenerator
 from langchain_core.messages import HumanMessage, SystemMessage
-from langgraph.graph import StateGraph, END
 
-from app.config import settings
 from app.db.models import SessionLocal
 from app.tools import lead_tools, email_tools
+from app.agents.base import (
+    Worker, WorkerSpec, WorkerEvent, get_llm, parse_json_lenient,
+)
 
 
-# ----- state -----
-
-class AgentState(TypedDict, total=False):
-    task: Literal["draft_email", "generate_leads"]
-    lead_id: Optional[int]
-    criteria: Optional[str]
-    plan: str
-    result: dict
-    events: list   # streamed back to UI
-
-
-# ----- LLM -----
-
-def get_llm():
-    return ChatOllama(
-        model=settings.ollama_model,
-        base_url=settings.ollama_base_url,
-        temperature=settings.ollama_temperature,
-    )
+SPEC = WorkerSpec(
+    name="sales",
+    display_name="Sales agent",
+    description="Manages leads, drafts cold emails, generates new leads.",
+    actions=["draft_email", "generate_leads", "search_leads"],
+    capabilities=(
+        "draft_email(lead_id): write a personalized cold email and save as draft. "
+        "generate_leads(criteria): create 3 fictional but realistic leads. "
+        "search_leads(criteria): filter existing leads by industry/title/company."
+    ),
+)
 
 
-# ----- nodes -----
+class SalesWorker:
+    spec = SPEC
 
-def plan_node(state: AgentState) -> AgentState:
-    """Ask the LLM to plan what it will do for this task."""
-    llm = get_llm()
-    task = state["task"]
-    if task == "draft_email":
-        prompt = (
-            f"You are a B2B sales agent. You will draft a personalized cold email "
-            f"for lead_id={state['lead_id']}. In ONE short sentence, state your plan."
-        )
-    else:
-        prompt = (
-            f"You are a sales agent. You will generate 3 fictional but realistic "
-            f"B2B leads matching: '{state.get('criteria', 'any industry')}'. "
-            f"In ONE short sentence, state your plan."
-        )
-    msg = llm.invoke([SystemMessage(content="Be terse."), HumanMessage(content=prompt)])
-    plan = msg.content.strip()
-    events = state.get("events", []) + [{"type": "plan", "content": plan}]
-    return {**state, "plan": plan, "events": events}
+    async def run(self, action: str, input: dict, task_id: str) -> AsyncGenerator[WorkerEvent, None]:
+        if action == "draft_email":
+            async for ev in self._draft_email(input, task_id):
+                yield ev
+        elif action == "generate_leads":
+            async for ev in self._generate_leads(input, task_id):
+                yield ev
+        elif action == "search_leads":
+            async for ev in self._search_leads(input, task_id):
+                yield ev
+        else:
+            yield WorkerEvent("error", self.spec.name, f"Unknown action: {action}", task_id)
 
+    async def _draft_email(self, input: dict, task_id: str):
+        lead_id = input.get("lead_id")
+        if not lead_id:
+            yield WorkerEvent("error", self.spec.name, "lead_id required", task_id)
+            return
 
-def execute_node(state: AgentState) -> AgentState:
-    """Run the actual tool work."""
-    if state["task"] == "draft_email":
-        return _execute_draft_email(state)
-    return _execute_generate_leads(state)
-
-
-def _execute_draft_email(state: AgentState) -> AgentState:
-    events = state.get("events", [])
-    db = SessionLocal()
-    try:
-        lead = lead_tools.get_lead(db, state["lead_id"])
-        if not lead:
-            events.append({"type": "error", "content": f"Lead {state['lead_id']} not found"})
-            return {**state, "result": {"ok": False}, "events": events}
-
-        events.append({"type": "tool", "content": f"Loaded lead: {lead['name']} ({lead['company']})"})
-
-        llm = get_llm()
-        system = (
-            "You write concise, personalized B2B cold emails. "
-            "Rules: under 120 words; one clear ask; reference the lead's notes; "
-            "no fluff, no 'I hope this email finds you well'. "
-            "Output strictly as JSON: {\"subject\": \"...\", \"body\": \"...\"}. "
-            "No markdown, no code fences, just the raw JSON object."
-        )
-        user = (
-            f"Lead: {lead['name']}, {lead['title']} at {lead['company']} "
-            f"({lead['industry']}).\nNotes: {lead['notes']}\n"
-            f"We sell a developer-focused agent platform that automates outbound + ops. "
-            f"Write the email."
-        )
-        events.append({"type": "thinking", "content": "Drafting email..."})
-
-        resp = llm.invoke([SystemMessage(content=system), HumanMessage(content=user)])
-        raw = resp.content.strip()
-
-        # robust JSON extraction (some models wrap in ```json fences)
-        if raw.startswith("```"):
-            raw = raw.strip("`").lstrip("json").strip()
+        db = SessionLocal()
         try:
-            parsed = json.loads(raw)
-        except json.JSONDecodeError:
-            # fallback: split heuristically
-            parsed = {"subject": "Quick question about " + lead["company"], "body": raw}
+            lead = lead_tools.get_lead(db, int(lead_id))
+            if not lead:
+                yield WorkerEvent("error", self.spec.name, f"Lead {lead_id} not found", task_id)
+                return
 
-        draft_id = email_tools.save_draft(db, lead["id"], parsed["subject"], parsed["body"])
+            yield WorkerEvent("tool", self.spec.name,
+                              f"Loaded lead: {lead['name']} ({lead['company']})", task_id)
+            yield WorkerEvent("thinking", self.spec.name, "Drafting email...", task_id)
 
-        events.append({
-            "type": "draft_ready",
-            "content": {
+            system = (
+                "You write concise, personalized B2B cold emails. "
+                "Rules: under 120 words; one clear ask; reference the lead's notes; "
+                "no fluff, no 'I hope this email finds you well'. "
+                "Output strictly as JSON: {\"subject\": \"...\", \"body\": \"...\"}. "
+                "No markdown, no code fences, just the raw JSON object."
+            )
+            user = (
+                f"Lead: {lead['name']}, {lead['title']} at {lead['company']} "
+                f"({lead['industry']}).\nNotes: {lead['notes']}\n"
+                f"We sell a developer-focused agent platform that automates outbound + ops. "
+                f"Write the email."
+            )
+            llm = get_llm()
+            resp = await asyncio.to_thread(
+                llm.invoke, [SystemMessage(content=system), HumanMessage(content=user)]
+            )
+            try:
+                parsed = parse_json_lenient(resp.content)
+            except Exception:
+                parsed = {
+                    "subject": f"Quick question about {lead['company']}",
+                    "body": resp.content.strip(),
+                }
+            draft_id = email_tools.save_draft(db, lead["id"], parsed["subject"], parsed["body"])
+            payload = {
                 "draft_id": draft_id,
                 "lead_id": lead["id"],
+                "lead_name": lead["name"],
                 "subject": parsed["subject"],
                 "body": parsed["body"],
-            },
-        })
-        return {**state, "result": {"ok": True, "draft_id": draft_id}, "events": events}
-    finally:
-        db.close()
+            }
+            yield WorkerEvent("done", self.spec.name, payload, task_id)
+        finally:
+            db.close()
 
-
-def _execute_generate_leads(state: AgentState) -> AgentState:
-    events = state.get("events", [])
-    criteria = state.get("criteria", "B2B SaaS companies")
-    db = SessionLocal()
-    try:
-        events.append({"type": "tool", "content": f"Generating 3 leads for: {criteria}"})
-        llm = get_llm()
-        system = (
-            "Generate exactly 3 fictional but realistic B2B leads. "
-            "Output strictly a JSON array: "
-            "[{\"name\":\"\",\"title\":\"\",\"company\":\"\",\"industry\":\"\",\"email\":\"\",\"notes\":\"\"}]. "
-            "Emails must use the .example domain. No markdown, no code fences."
-        )
-        user = f"Criteria: {criteria}"
-        resp = llm.invoke([SystemMessage(content=system), HumanMessage(content=user)])
-        raw = resp.content.strip()
-        if raw.startswith("```"):
-            raw = raw.strip("`").lstrip("json").strip()
+    async def _generate_leads(self, input: dict, task_id: str):
+        criteria = input.get("criteria", "B2B SaaS companies")
+        db = SessionLocal()
         try:
-            arr = json.loads(raw)
-        except json.JSONDecodeError:
-            events.append({"type": "error", "content": "LLM returned non-JSON; retry."})
-            return {**state, "result": {"ok": False}, "events": events}
-
-        created = []
-        for row in arr[:3]:
+            yield WorkerEvent("tool", self.spec.name,
+                              f"Generating 3 leads for: {criteria}", task_id)
+            system = (
+                "Generate exactly 3 fictional but realistic B2B leads. "
+                "Output strictly a JSON array: "
+                "[{\"name\":\"\",\"title\":\"\",\"company\":\"\",\"industry\":\"\",\"email\":\"\",\"notes\":\"\"}]. "
+                "Emails must use the .example domain. No markdown, no code fences."
+            )
+            llm = get_llm()
+            resp = await asyncio.to_thread(
+                llm.invoke,
+                [SystemMessage(content=system), HumanMessage(content=f"Criteria: {criteria}")],
+            )
             try:
-                nid = lead_tools.add_lead(db, row)
-                created.append({**row, "id": nid})
-            except Exception as e:
-                events.append({"type": "error", "content": f"Skipped duplicate or bad lead: {e}"})
-                db.rollback()
+                arr = parse_json_lenient(resp.content)
+            except Exception:
+                yield WorkerEvent("error", self.spec.name, "LLM returned non-JSON", task_id)
+                return
 
-        events.append({"type": "leads_created", "content": created})
-        return {**state, "result": {"ok": True, "created": created}, "events": events}
-    finally:
-        db.close()
+            # Expecting a list of lead dicts. Guard against the LLM giving us
+            # an object, a string, or an empty/garbled response.
+            if not isinstance(arr, list):
+                yield WorkerEvent("error", self.spec.name,
+                                  f"LLM did not return a JSON array (got {type(arr).__name__})", task_id)
+                return
+            if not arr:
+                yield WorkerEvent("error", self.spec.name,
+                                  "LLM returned an empty list — try a more specific criteria", task_id)
+                return
+
+            created = []
+            for row in arr[:3]:
+                try:
+                    nid = lead_tools.add_lead(db, row)
+                    created.append({**row, "id": nid})
+                except Exception as e:
+                    db.rollback()
+                    yield WorkerEvent("tool", self.spec.name,
+                                      f"Skipped (dup or bad row): {e}", task_id)
+
+            yield WorkerEvent("done", self.spec.name, {"created": created}, task_id)
+        finally:
+            db.close()
+
+    async def _search_leads(self, input: dict, task_id: str):
+        criteria = input.get("criteria")
+        db = SessionLocal()
+        try:
+            results = lead_tools.search_leads(db, criteria=criteria, limit=20)
+            yield WorkerEvent("tool", self.spec.name,
+                              f"Found {len(results)} leads matching '{criteria}'", task_id)
+            yield WorkerEvent("done", self.spec.name, {"leads": results}, task_id)
+        finally:
+            db.close()
 
 
-def finalize_node(state: AgentState) -> AgentState:
-    events = state.get("events", []) + [{"type": "done", "content": state.get("result", {})}]
-    return {**state, "events": events}
+# ---- backward compat with Phase 1 endpoints ----
+# The Phase 1 routes /api/agents/sales/draft_email and /generate_leads
+# still call run_agent(...) directly. Keep that working.
 
-
-# ----- graph -----
-
-def build_graph():
-    g = StateGraph(AgentState)
-    g.add_node("plan", plan_node)
-    g.add_node("execute", execute_node)
-    g.add_node("finalize", finalize_node)
-    g.set_entry_point("plan")
-    g.add_edge("plan", "execute")
-    g.add_edge("execute", "finalize")
-    g.add_edge("finalize", END)
-    return g.compile()
-
-
-GRAPH = build_graph()
-
-
-def run_agent(task: str, lead_id: Optional[int] = None, criteria: Optional[str] = None):
-    """Run the agent and yield events one by one for SSE."""
-    state: AgentState = {"task": task, "events": []}
+def run_agent(task: str, lead_id: int | None = None, criteria: str | None = None):
+    """Sync generator for Phase 1 SSE endpoints."""
+    worker = SalesWorker()
+    inp = {}
     if lead_id is not None:
-        state["lead_id"] = lead_id
+        inp["lead_id"] = lead_id
     if criteria is not None:
-        state["criteria"] = criteria
+        inp["criteria"] = criteria
 
-    last_emitted = 0
-    for step in GRAPH.stream(state):
-        # step is {node_name: state_dict}
-        for _, partial in step.items():
-            events = partial.get("events", [])
-            for ev in events[last_emitted:]:
-                yield ev
-            last_emitted = len(events)
+    async def collect():
+        out = []
+        async for ev in worker.run(task, inp, task_id="legacy"):
+            # Map new WorkerEvent.type back to Phase 1 vocabulary
+            if ev.type == "done":
+                if task == "draft_email" and isinstance(ev.content, dict):
+                    out.append({"type": "draft_ready", "content": ev.content})
+                elif task == "generate_leads" and isinstance(ev.content, dict):
+                    out.append({"type": "leads_created", "content": ev.content.get("created", [])})
+                out.append({"type": "done", "content": ev.content})
+            else:
+                out.append({"type": ev.type, "content": ev.content})
+        return out
+
+    events = asyncio.run(collect())
+    for ev in events:
+        yield ev
