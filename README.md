@@ -1,118 +1,109 @@
-# Phase 2 — Multi-agent team (manager + 3 devs + analyst + sales)
+# Phase 3 — Users, companies, boss admin, data isolation
 
-Builds on Phase 1. Same Postgres, same Ollama, same FastAPI app. Adds:
+Builds on Phase 1 + Phase 2. Adds the **product layer**:
 
-- **Manager agent** (supervisor) — decomposes user requests into subtasks, routes to specialists, synthesizes results
-- **Dev agents x3** — backend, frontend, QA — each with its own tools and system prompt
-- **Social analyst** — Facebook + Instagram trend analysis (mocked APIs, ready for real Meta Graph API later)
-- **Sales agent** — your Phase 1 agent, now a worker the manager can call
-- **Task queue** — every agent action goes through a Postgres table so runs are replayable and auditable
-- **Chat UI** — talk to the manager in natural language; watch each subtask stream live
+- **Users + auth** — sign up, sign in, JWT tokens
+- **Companies** — every user owns exactly one company with the **fixed org chart** (manager + 3 devs + sales + analyst)
+- **Data isolation** — leads, drafts, chat sessions, tasks all scoped to the user's company
+- **Boss admin role** — `is_admin=true` flag; bypasses isolation, can manage users, edit the org chart template
+- **Company workspace UI** — login screen, top bar with company name + user menu, agent roster sidebar showing the team
 
-## How to apply Phase 2 on top of Phase 1
+Phase 1 endpoints (`/api/leads`, draft email) now require auth and filter by company.
+Phase 2 endpoints (chat, tasks) same — but the chat sessions belong to the company.
 
-This zip contains **only the new/changed files**. Copy them over your existing Phase 1 directory — nothing in Phase 1 gets deleted, only added to.
+## Install on top of Phase 1 + 2
+
+Same pattern as Phase 2 — unzip over your existing project:
 
 ```bash
-# Assuming your Phase 1 lives in ~/projects/phase1
-cd ~/projects/phase1
-
-# Unzip phase 2 over it (will only add new files + replace main.py, App.jsx, sales_agent.py)
-unzip -o ~/Downloads/phase2-multiagent.zip
+cd ~/path/to/phase1            # your merged Phase 1+2 dir
+unzip -o ~/Downloads/phase3-users-companies.zip
+cp -r phase3/* .
+rm -rf phase3
 ```
 
-Files changed from Phase 1:
-- `backend/app/main.py` (adds new routes, keeps old ones)
-- `backend/app/agents/sales_agent.py` (refactored to be a callable worker, **plus** the original endpoints still work)
-- `backend/requirements.txt` (no new deps actually — same versions work)
-- `frontend/src/App.jsx` (adds chat panel)
-- `frontend/src/styles.css` (adds chat styles)
+Files **added**:
+- `backend/app/db/migrate_phase3.py` — users, companies, company_members tables + adds `company_id` to existing tables
+- `backend/app/auth/security.py` — password hashing, JWT
+- `backend/app/auth/deps.py` — FastAPI dependencies for current_user, current_company
+- `backend/app/routes/auth_routes.py`
+- `backend/app/routes/company_routes.py`
+- `backend/app/routes/admin_routes.py`
+- `frontend/src/auth/AuthContext.jsx`
+- `frontend/src/auth/LoginScreen.jsx`
+- `frontend/src/components/TopBar.jsx`
+- `frontend/src/components/TeamRoster.jsx`
+- `frontend/src/components/AdminPanel.jsx`
 
-Files added:
-- `backend/app/agents/manager.py` — supervisor agent + LangGraph orchestrator
-- `backend/app/agents/dev_backend.py`
-- `backend/app/agents/dev_frontend.py`
-- `backend/app/agents/dev_qa.py`
-- `backend/app/agents/social_analyst.py`
-- `backend/app/agents/base.py` — shared worker contract
-- `backend/app/agents/registry.py` — agent lookup + capabilities
-- `backend/app/tools/dev_tools.py` — sandboxed code/spec tools
-- `backend/app/tools/social_tools.py` — mocked FB/IG trend data
-- `backend/app/tools/task_queue.py` — Postgres task queue
-- `backend/app/db/migrate_phase2.py` — adds new tables, keeps Phase 1 data
-- `frontend/src/components/ChatPanel.jsx`
-- `frontend/src/components/TaskKanban.jsx`
-- `frontend/src/components/AgentBadge.jsx`
+Files **replaced**:
+- `backend/requirements.txt` — adds `passlib[bcrypt]` and `python-jose[cryptography]`
+- `backend/app/config.py` — adds JWT secret + token TTL
+- `backend/app/main.py` — wires auth, mounts new routers, adds isolation guards to existing routes
+- `backend/app/tools/lead_tools.py` — every query takes `company_id`
+- `backend/app/tools/email_tools.py` — joins through Lead to enforce company scope
+- `backend/app/agents/manager.py` — passes `company_id` into worker context
+- `backend/app/agents/sales_agent.py` — uses company-scoped tools
+- `frontend/src/App.jsx` — routes between login screen and main app
+- `frontend/src/api/client.js` — sends auth header on every request
+- `frontend/src/styles.css` — login screen + top bar styles
 
-## Steps to run Phase 2
+## Setup steps
 
-1. Stop Phase 1 backend if running (`Ctrl+C` the uvicorn process). Frontend can stay.
-2. Make sure Postgres + Ollama are still up: `docker compose ps`, `ollama list`.
-3. Pull one more model for the manager (better tool calling): `ollama pull qwen2.5:7b` — already in your Phase 1 list but skip if you skipped it then.
-4. Apply migrations (additive, won't drop Phase 1 data):
+1. Stop your backend if running.
+2. Install new Python deps:
    ```bash
-   cd backend
-   source venv/bin/activate
-   python -m app.db.migrate_phase2
+   cd backend && source venv/bin/activate
+   pip install -r requirements.txt
    ```
-5. Restart backend: `uvicorn app.main:app --reload --port 8000`
-6. Frontend: `npm run dev` (or refresh if already running)
-7. Open http://localhost:5173 — you'll now see a chat panel on the right side.
+3. Pick a JWT secret. Create `backend/.env`:
+   ```
+   JWT_SECRET=change-me-to-something-random-and-long
+   ```
+   (Or just let the default dev secret stay — fine for local.)
+4. Run the Phase 3 migration:
+   ```bash
+   python -m app.db.migrate_phase3
+   ```
+   This adds `users`, `companies`, `company_members`, plus a nullable `company_id` column on `leads`, `email_drafts`, `chat_sessions`. Existing Phase 1+2 data stays.
+5. Bootstrap the first user (the boss):
+   ```bash
+   python -m app.db.bootstrap_admin
+   ```
+   This creates a default admin: `boss@local.dev` / `bosspass`. Change the password from the UI after first login.
+6. Start the backend: `uvicorn app.main:app --reload --port 8000`
+7. Refresh the frontend (or `npm run dev`).
 
-## Try these prompts in the chat
+## What you'll see
 
-- "Draft cold emails for everyone in fintech"
-- "What's trending on Instagram for B2B SaaS this week?"
-- "Spec out a backend endpoint for tracking email opens"
-- "Find 3 new leads in healthtech, then draft an outreach for each"
-- "Review the lead status workflow for issues"
+1. **Login screen** loads first.
+2. **Sign up** as a normal user — your company gets created automatically with the fixed team.
+3. Top bar shows your company name + the team roster on the left.
+4. Phase 1 lead list, Phase 2 chat panel — all your data is isolated to your company.
+5. Sign in as `boss@local` to see the **admin panel** (extra route in the top bar): user list, company list, ability to suspend users.
 
-The manager decides which agents to call, runs them, and shows you everything in the kanban.
+## The locked org chart
 
-## How the supervisor pattern works
+When a user signs up, this is created server-side and **cannot be modified by the user**:
 
 ```
-                user message
-                     │
-                     ▼
-              ┌──────────────┐
-              │   manager    │  decomposes into tasks
-              └──────┬───────┘  picks workers + parallelism
-                     │
-        ┌────────────┼────────────┬────────────┐
-        ▼            ▼            ▼            ▼
-   [sales]    [dev_backend]   [analyst]    [dev_qa]
-        │            │            │            │
-        └────────────┴────────────┴────────────┘
-                     │
-                     ▼
-              ┌──────────────┐
-              │  aggregator  │  manager re-enters
-              └──────┬───────┘  to synthesize results
-                     │
-                     ▼
-              streamed answer
-```
-
-The manager calls a single LLM with strict JSON output to produce a task plan:
-```json
-{
-  "tasks": [
-    {"id": "t1", "agent": "sales", "action": "draft_email", "input": {...}, "depends_on": []},
-    {"id": "t2", "agent": "social_analyst", "action": "trend_report", "input": {...}, "depends_on": []},
-    {"id": "t3", "agent": "dev_qa", "action": "review", "input": {...}, "depends_on": ["t1"]}
-  ]
+company {
+  manager        (1 agent)
+  sales          (1 agent)
+  dev_backend    (1 agent)
+  dev_frontend   (1 agent)
+  dev_qa         (1 agent)
+  social_analyst (1 agent)
 }
 ```
 
-Tasks with no `depends_on` run in parallel via `asyncio.gather`. The DAG executor handles the rest.
+The template lives in `backend/app/db/org_chart.py`. Users have read-only access. Only `is_admin=true` users can mutate it via `/api/admin/template`.
 
-## What's deliberately faked
+## Data isolation model
 
-- **Dev agents don't execute code**. They produce specs, diffs, and review notes. Real code execution is a Phase 4 concern (sandboxing, security).
-- **Social analyst** returns mock trend data from `social_tools.py`. Wire to real Meta Graph API in Phase 5.
-- **Manager doesn't call itself recursively** yet. Single-level decomposition. Recursive planning is Phase 4.
+Every query that returns user-visible data has a `WHERE company_id = :company_id` clause. The dependency `get_current_company()` resolves the company from the JWT, and FastAPI's `Depends()` system injects it everywhere.
 
-## Phase 3 preview
+Boss admin bypasses isolation via a separate dependency `get_company_or_admin_override()` that accepts an optional `?company_id=X` query param for admins only.
 
-Phase 3 wraps this with users, companies, auth, and a proper dashboard. The `chat_sessions` table already has a nullable `user_id` and `company_id` — Phase 3 just fills those in.
+## Phase 4 preview
+
+Phase 4 is cost optimization + observability — the model router, semantic cache, per-company token budgets, and reusing AgentLens for tracing. The `company_id` you have now is exactly the unit budgets will be applied to.
