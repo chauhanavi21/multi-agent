@@ -1,8 +1,7 @@
-"""Sales agent (Phase 1 logic, refactored to be a callable worker).
+"""Sales agent — Phase 3: company-scoped.
 
-Public surface:
-  - SalesWorker        -> the new Worker the manager calls
-  - run_agent(...)     -> kept for backward compat with Phase 1 endpoints
+The Worker.run signature is unchanged, but `input` now carries `company_id`.
+The manager injects it before calling any worker.
 """
 from __future__ import annotations
 import json
@@ -30,6 +29,13 @@ SPEC = WorkerSpec(
 )
 
 
+def _require_company(input: dict, agent_name: str, task_id: str):
+    cid = input.get("company_id")
+    if not cid:
+        return None, WorkerEvent("error", agent_name, "Missing company_id in worker input", task_id)
+    return int(cid), None
+
+
 class SalesWorker:
     spec = SPEC
 
@@ -47,6 +53,11 @@ class SalesWorker:
             yield WorkerEvent("error", self.spec.name, f"Unknown action: {action}", task_id)
 
     async def _draft_email(self, input: dict, task_id: str):
+        company_id, err = _require_company(input, self.spec.name, task_id)
+        if err:
+            yield err
+            return
+
         lead_id = input.get("lead_id")
         if not lead_id:
             yield WorkerEvent("error", self.spec.name, "lead_id required", task_id)
@@ -54,9 +65,10 @@ class SalesWorker:
 
         db = SessionLocal()
         try:
-            lead = lead_tools.get_lead(db, int(lead_id))
+            lead = lead_tools.get_lead(db, company_id, int(lead_id))
             if not lead:
-                yield WorkerEvent("error", self.spec.name, f"Lead {lead_id} not found", task_id)
+                yield WorkerEvent("error", self.spec.name,
+                                  f"Lead {lead_id} not found in this company", task_id)
                 return
 
             yield WorkerEvent("tool", self.spec.name,
@@ -87,19 +99,26 @@ class SalesWorker:
                     "subject": f"Quick question about {lead['company']}",
                     "body": resp.content.strip(),
                 }
-            draft_id = email_tools.save_draft(db, lead["id"], parsed["subject"], parsed["body"])
+            draft_id = email_tools.save_draft(db, company_id, lead["id"],
+                                              parsed["subject"], parsed["body"])
+            if draft_id is None:
+                yield WorkerEvent("error", self.spec.name, "Failed to save draft", task_id)
+                return
             payload = {
-                "draft_id": draft_id,
-                "lead_id": lead["id"],
+                "draft_id": draft_id, "lead_id": lead["id"],
                 "lead_name": lead["name"],
-                "subject": parsed["subject"],
-                "body": parsed["body"],
+                "subject": parsed["subject"], "body": parsed["body"],
             }
             yield WorkerEvent("done", self.spec.name, payload, task_id)
         finally:
             db.close()
 
     async def _generate_leads(self, input: dict, task_id: str):
+        company_id, err = _require_company(input, self.spec.name, task_id)
+        if err:
+            yield err
+            return
+
         criteria = input.get("criteria", "B2B SaaS companies")
         db = SessionLocal()
         try:
@@ -121,22 +140,19 @@ class SalesWorker:
             except Exception:
                 yield WorkerEvent("error", self.spec.name, "LLM returned non-JSON", task_id)
                 return
-
-            # Expecting a list of lead dicts. Guard against the LLM giving us
-            # an object, a string, or an empty/garbled response.
             if not isinstance(arr, list):
                 yield WorkerEvent("error", self.spec.name,
                                   f"LLM did not return a JSON array (got {type(arr).__name__})", task_id)
                 return
             if not arr:
                 yield WorkerEvent("error", self.spec.name,
-                                  "LLM returned an empty list — try a more specific criteria", task_id)
+                                  "LLM returned an empty list — try more specific criteria", task_id)
                 return
 
             created = []
             for row in arr[:3]:
                 try:
-                    nid = lead_tools.add_lead(db, row)
+                    nid = lead_tools.add_lead(db, company_id, row)
                     created.append({**row, "id": nid})
                 except Exception as e:
                     db.rollback()
@@ -148,10 +164,15 @@ class SalesWorker:
             db.close()
 
     async def _search_leads(self, input: dict, task_id: str):
+        company_id, err = _require_company(input, self.spec.name, task_id)
+        if err:
+            yield err
+            return
+
         criteria = input.get("criteria")
         db = SessionLocal()
         try:
-            results = lead_tools.search_leads(db, criteria=criteria, limit=20)
+            results = lead_tools.search_leads(db, company_id, criteria=criteria, limit=20)
             yield WorkerEvent("tool", self.spec.name,
                               f"Found {len(results)} leads matching '{criteria}'", task_id)
             yield WorkerEvent("done", self.spec.name, {"leads": results}, task_id)
@@ -160,13 +181,12 @@ class SalesWorker:
 
 
 # ---- backward compat with Phase 1 endpoints ----
-# The Phase 1 routes /api/agents/sales/draft_email and /generate_leads
-# still call run_agent(...) directly. Keep that working.
 
-def run_agent(task: str, lead_id: int | None = None, criteria: str | None = None):
-    """Sync generator for Phase 1 SSE endpoints."""
+def run_agent(task: str, company_id: int, lead_id: int | None = None,
+              criteria: str | None = None):
+    """Sync generator wrapper used by the original Phase 1 SSE endpoints (now company-scoped)."""
     worker = SalesWorker()
-    inp = {}
+    inp = {"company_id": company_id}
     if lead_id is not None:
         inp["lead_id"] = lead_id
     if criteria is not None:
@@ -175,7 +195,6 @@ def run_agent(task: str, lead_id: int | None = None, criteria: str | None = None
     async def collect():
         out = []
         async for ev in worker.run(task, inp, task_id="legacy"):
-            # Map new WorkerEvent.type back to Phase 1 vocabulary
             if ev.type == "done":
                 if task == "draft_email" and isinstance(ev.content, dict):
                     out.append({"type": "draft_ready", "content": ev.content})
