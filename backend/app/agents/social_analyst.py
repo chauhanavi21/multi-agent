@@ -1,10 +1,7 @@
-"""Social analyst — analyzes trends on Facebook + Instagram (mocked APIs)."""
+"""Social analyst — Phase 4 routed."""
 from __future__ import annotations
-import asyncio
 from typing import AsyncGenerator
-from langchain_core.messages import HumanMessage, SystemMessage
-
-from app.agents.base import Worker, WorkerSpec, WorkerEvent, get_llm
+from app.agents.base import Worker, WorkerSpec, WorkerEvent, route_llm
 from app.tools import social_tools
 
 
@@ -14,13 +11,13 @@ SPEC = WorkerSpec(
     description="Analyzes Facebook + Instagram trends, hashtags, top posts, sentiment.",
     actions=["trend_report", "hashtag_research", "sentiment_check"],
     capabilities=(
-        "trend_report(topic, platform): full trend report (hashtags + posts + sentiment + summary). "
+        "trend_report(topic, platform): full trend report. "
         "hashtag_research(topic, platform): trending hashtags only. "
         "sentiment_check(topic, platform): audience sentiment for a topic."
     ),
 )
 
-
+ACTION_TIER = "standard"
 PLATFORMS = ("instagram", "facebook")
 
 
@@ -52,7 +49,6 @@ class SocialAnalystWorker:
         if not topic:
             yield WorkerEvent("error", self.spec.name, "Missing 'topic'", task_id)
             return
-
         platforms = self._normalize_platforms(input.get("platform"))
         yield WorkerEvent("tool", self.spec.name,
                           f"Pulling data: {topic} on {', '.join(platforms)}", task_id)
@@ -65,22 +61,21 @@ class SocialAnalystWorker:
                 "sentiment": social_tools.get_audience_sentiment(topic, p),
             }
 
-        yield WorkerEvent("thinking", self.spec.name,
-                          "Synthesizing 1-paragraph executive summary...", task_id)
+        yield WorkerEvent("thinking", self.spec.name, "Synthesizing summary...", task_id)
         system = (
             "You are a social media analyst. Given raw trend data, write a 3-4 sentence "
-            "executive summary highlighting: the strongest hashtag opportunity, one notable "
-            "content angle, and the dominant sentiment. Be specific, no fluff."
+            "executive summary highlighting: strongest hashtag opportunity, one notable "
+            "content angle, dominant sentiment. Be specific, no fluff."
         )
-        llm = get_llm(temperature=0.3)
-        resp = await asyncio.to_thread(
-            llm.invoke,
-            [SystemMessage(content=system),
-             HumanMessage(content=f"Topic: {topic}\nData: {data}")],
-        )
+        result = await route_llm(system, f"Topic: {topic}\nData: {data}",
+                                  tier=ACTION_TIER, agent_name=self.spec.name)
         yield WorkerEvent("done", self.spec.name,
                           {"topic": topic, "platforms": platforms,
-                           "summary": resp.content.strip(), "data": data},
+                           "summary": result.content.strip(), "data": data,
+                           "_router": {"model": result.model_used,
+                                       "cost_usd": result.cost_usd,
+                                       "latency_ms": result.latency_ms,
+                                       "cache_hit": result.was_cache_hit}},
                           task_id)
 
     async def _hashtag_research(self, input: dict, task_id: str):
