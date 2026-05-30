@@ -1,13 +1,7 @@
-"""QA agent — read-only review and analysis.
-
-This agent cannot modify code or DB. It produces structured review notes.
-"""
+"""QA agent — Phase 4 routed."""
 from __future__ import annotations
-import asyncio
 from typing import AsyncGenerator
-from langchain_core.messages import HumanMessage, SystemMessage
-
-from app.agents.base import Worker, WorkerSpec, WorkerEvent, get_llm, parse_json_lenient
+from app.agents.base import Worker, WorkerSpec, WorkerEvent, route_llm, parse_json_lenient
 from app.tools.dev_tools import make_review_artifact
 
 
@@ -21,6 +15,8 @@ SPEC = WorkerSpec(
         "list_test_cases(target): list test cases that should exist for a given target."
     ),
 )
+
+ACTION_TIER = "cheap"   # structured classification, phi3 is fine
 
 
 class QAWorker:
@@ -44,52 +40,47 @@ class QAWorker:
             return
 
         yield WorkerEvent("thinking", self.spec.name, f"Reviewing: {target}", task_id)
-
         system = (
             "You are a strict QA reviewer. Read the target and return findings as JSON. "
             "Format: {\"severity\": \"info|warning|critical\", \"findings\": [\"...\", \"...\"]}. "
-            "Severity = max severity across findings. Be specific and actionable. "
-            "If no issues, severity=info and findings=[\"Looks good\"]. "
-            "Output only raw JSON, no markdown fences."
+            "If no issues, severity=info and findings=[\"Looks good\"]. Output only raw JSON."
         )
-        llm = get_llm(temperature=0.2)
-        resp = await asyncio.to_thread(
-            llm.invoke,
-            [SystemMessage(content=system), HumanMessage(content=f"Target: {target}\n\n{content}")],
-        )
+        result = await route_llm(system, f"Target: {target}\n\n{content}",
+                                  tier=ACTION_TIER, agent_name=self.spec.name)
         try:
-            parsed = parse_json_lenient(resp.content)
+            parsed = parse_json_lenient(result.content)
             artifact = make_review_artifact(
                 target=target,
                 findings=parsed.get("findings", []),
                 severity=parsed.get("severity", "info"),
             )
         except Exception:
-            artifact = make_review_artifact(
-                target=target,
-                findings=[resp.content.strip()],
-                severity="info",
-            )
+            artifact = make_review_artifact(target=target,
+                                             findings=[result.content.strip()],
+                                             severity="info")
+        artifact["_router"] = {"model": result.model_used, "cost_usd": result.cost_usd,
+                                "latency_ms": result.latency_ms,
+                                "cache_hit": result.was_cache_hit}
         yield WorkerEvent("done", self.spec.name, artifact, task_id)
 
     async def _test_cases(self, input: dict, task_id: str):
         target = input.get("target", "(unspecified)")
         content = input.get("content") or input.get("spec") or target
-
         yield WorkerEvent("thinking", self.spec.name, f"Listing test cases for: {target}", task_id)
-
         system = (
             "List test cases as a JSON array of strings. Cover happy path, edge cases, "
-            "and failure modes. Be concrete. Output only the JSON array, no fences."
+            "and failure modes. Output only the JSON array, no fences."
         )
-        llm = get_llm(temperature=0.2)
-        resp = await asyncio.to_thread(
-            llm.invoke,
-            [SystemMessage(content=system), HumanMessage(content=str(content))],
-        )
+        result = await route_llm(system, str(content), tier=ACTION_TIER,
+                                  agent_name=self.spec.name)
         try:
-            cases = parse_json_lenient(resp.content)
+            cases = parse_json_lenient(result.content)
         except Exception:
-            cases = [resp.content.strip()]
+            cases = [result.content.strip()]
         yield WorkerEvent("done", self.spec.name,
-                          {"target": target, "test_cases": cases}, task_id)
+                          {"target": target, "test_cases": cases,
+                           "_router": {"model": result.model_used,
+                                       "cost_usd": result.cost_usd,
+                                       "latency_ms": result.latency_ms,
+                                       "cache_hit": result.was_cache_hit}},
+                          task_id)
