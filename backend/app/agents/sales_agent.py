@@ -1,19 +1,20 @@
-"""Sales agent — Phase 3: company-scoped.
-
-The Worker.run signature is unchanged, but `input` now carries `company_id`.
-The manager injects it before calling any worker.
-"""
+"""Sales agent — Phase 4: uses the router with per-action cost tiers."""
 from __future__ import annotations
-import json
-import asyncio
 from typing import AsyncGenerator
-from langchain_core.messages import HumanMessage, SystemMessage
 
 from app.db.models import SessionLocal
 from app.tools import lead_tools, email_tools
 from app.agents.base import (
-    Worker, WorkerSpec, WorkerEvent, get_llm, parse_json_lenient,
+    Worker, WorkerSpec, WorkerEvent, route_llm, parse_json_lenient,
 )
+
+
+# Per-action cost tier. Drafts and lead-gen are "standard"; searches don't hit LLM.
+ACTION_TIERS = {
+    "draft_email": "standard",
+    "generate_leads": "standard",
+    "search_leads": "cheap",   # not actually an LLM call, but if it were
+}
 
 
 SPEC = WorkerSpec(
@@ -88,16 +89,19 @@ class SalesWorker:
                 f"We sell a developer-focused agent platform that automates outbound + ops. "
                 f"Write the email."
             )
-            llm = get_llm()
-            resp = await asyncio.to_thread(
-                llm.invoke, [SystemMessage(content=system), HumanMessage(content=user)]
-            )
+
+            result = await route_llm(system, user, tier=ACTION_TIERS["draft_email"],
+                                     agent_name=self.spec.name)
+            if result.was_cache_hit:
+                yield WorkerEvent("tool", self.spec.name,
+                                  f"Cache hit (similarity match)", task_id)
+
             try:
-                parsed = parse_json_lenient(resp.content)
+                parsed = parse_json_lenient(result.content)
             except Exception:
                 parsed = {
                     "subject": f"Quick question about {lead['company']}",
-                    "body": resp.content.strip(),
+                    "body": result.content.strip(),
                 }
             draft_id = email_tools.save_draft(db, company_id, lead["id"],
                                               parsed["subject"], parsed["body"])
@@ -108,6 +112,13 @@ class SalesWorker:
                 "draft_id": draft_id, "lead_id": lead["id"],
                 "lead_name": lead["name"],
                 "subject": parsed["subject"], "body": parsed["body"],
+                "_router": {
+                    "model": result.model_used,
+                    "cost_usd": result.cost_usd,
+                    "latency_ms": result.latency_ms,
+                    "cache_hit": result.was_cache_hit,
+                    "downgraded": result.was_downgraded,
+                },
             }
             yield WorkerEvent("done", self.spec.name, payload, task_id)
         finally:
@@ -130,13 +141,11 @@ class SalesWorker:
                 "[{\"name\":\"\",\"title\":\"\",\"company\":\"\",\"industry\":\"\",\"email\":\"\",\"notes\":\"\"}]. "
                 "Emails must use the .example domain. No markdown, no code fences."
             )
-            llm = get_llm()
-            resp = await asyncio.to_thread(
-                llm.invoke,
-                [SystemMessage(content=system), HumanMessage(content=f"Criteria: {criteria}")],
-            )
+            result = await route_llm(system, f"Criteria: {criteria}",
+                                     tier=ACTION_TIERS["generate_leads"],
+                                     agent_name=self.spec.name)
             try:
-                arr = parse_json_lenient(resp.content)
+                arr = parse_json_lenient(result.content)
             except Exception:
                 yield WorkerEvent("error", self.spec.name, "LLM returned non-JSON", task_id)
                 return
@@ -146,7 +155,7 @@ class SalesWorker:
                 return
             if not arr:
                 yield WorkerEvent("error", self.spec.name,
-                                  "LLM returned an empty list — try more specific criteria", task_id)
+                                  "LLM returned an empty list", task_id)
                 return
 
             created = []
@@ -157,7 +166,7 @@ class SalesWorker:
                 except Exception as e:
                     db.rollback()
                     yield WorkerEvent("tool", self.spec.name,
-                                      f"Skipped (dup or bad row): {e}", task_id)
+                                      f"Skipped: {e}", task_id)
 
             yield WorkerEvent("done", self.spec.name, {"created": created}, task_id)
         finally:
@@ -168,7 +177,6 @@ class SalesWorker:
         if err:
             yield err
             return
-
         criteria = input.get("criteria")
         db = SessionLocal()
         try:
@@ -181,10 +189,11 @@ class SalesWorker:
 
 
 # ---- backward compat with Phase 1 endpoints ----
+import asyncio
+
 
 def run_agent(task: str, company_id: int, lead_id: int | None = None,
               criteria: str | None = None):
-    """Sync generator wrapper used by the original Phase 1 SSE endpoints (now company-scoped)."""
     worker = SalesWorker()
     inp = {"company_id": company_id}
     if lead_id is not None:
