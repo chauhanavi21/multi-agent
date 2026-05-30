@@ -1,20 +1,23 @@
-"""Manager agent — Phase 3: company-scoped.
+"""Manager agent — Phase 4.
 
-Same flow as Phase 2 (plan → execute DAG → aggregate), but every worker
-gets `company_id` injected into its input. Chat sessions are also created
-with the right company_id and user_id.
+New in Phase 4:
+- Sets trace context at the top of the run so workers inherit company_id
+  and parent_span_id for the cost router.
+- Planning uses 'cheap' tier (phi3 is fine for JSON DAG output).
+- Aggregation uses 'quality' tier so user-facing replies can use Haiku if
+  cloud is enabled.
 """
 from __future__ import annotations
 import asyncio
 import json
 from typing import AsyncGenerator
-from langchain_core.messages import HumanMessage, SystemMessage
 
 from app.db.models import SessionLocal
 from app.db.migrate_phase2 import ChatSession, AgentMessage
-from app.agents.base import WorkerEvent, get_llm, parse_json_lenient
+from app.agents.base import WorkerEvent, route_llm, parse_json_lenient
 from app.agents import registry
 from app.tools import task_queue
+from app.cost import tracing
 
 
 PLAN_SYSTEM_PROMPT = """You are a Manager agent coordinating a team of specialist AI agents.
@@ -27,14 +30,13 @@ Rules:
 - Output ONLY a JSON object: {{"tasks": [...], "reply_hint": "..."}}.
 - Each task: {{"id": "t1", "agent": "<name>", "action": "<action>", "input": {{...}}, "depends_on": []}}.
 - task ids are t1, t2, t3, ... unique within the plan.
-- depends_on lists task ids that must complete before this one starts.
-- If a task needs output from a dependency, write the input value as "${{tN.output.field}}".
+- depends_on lists task ids that must complete first.
+- If a task needs output from a dependency, write the value as "${{tN.output.field}}".
 - Keep plans SMALL: 1-5 tasks max.
-- If the user request is conversational, output {{"tasks": [], "reply_hint": "<short reply>"}}.
+- If conversational, output {{"tasks": [], "reply_hint": "<short reply>"}}.
 - Do NOT include company_id in inputs — that's injected automatically.
 - No markdown, no code fences. Raw JSON only.
 """
-
 
 AGGREGATE_SYSTEM_PROMPT = """You are the Manager agent. Workers have completed their tasks.
 Write a concise reply to the user that synthesizes their outputs.
@@ -73,14 +75,13 @@ def _substitute_refs(value, outputs: dict):
     return value
 
 
-async def _run_one_task(task_spec: dict, db_task_id: int, outputs: dict,
-                        event_queue: asyncio.Queue, company_id: int):
+async def _run_one_task(task_spec, db_task_id, outputs, event_queue,
+                        company_id, session_id):
     agent_name = task_spec["agent"]
     action = task_spec["action"]
     task_key = task_spec["id"]
     raw_input = task_spec.get("input", {}) or {}
     resolved_input = _substitute_refs(raw_input, outputs)
-    # Inject company_id into every worker call. This is what enforces isolation.
     resolved_input = {**resolved_input, "company_id": company_id}
 
     worker = registry.get_worker(agent_name)
@@ -88,7 +89,7 @@ async def _run_one_task(task_spec: dict, db_task_id: int, outputs: dict,
     try:
         task_queue.mark_running(db, db_task_id)
         await event_queue.put(WorkerEvent("status", agent_name,
-                                          {"task_key": task_key, "status": "running"}, task_key))
+                                           {"task_key": task_key, "status": "running"}, task_key))
 
         if worker is None:
             err = f"Unknown agent: {agent_name}"
@@ -97,163 +98,191 @@ async def _run_one_task(task_spec: dict, db_task_id: int, outputs: dict,
             outputs[task_key] = {"error": err}
             return
 
-        final_output = None
+        # Set per-worker trace context so its LLM calls log as children.
+        worker_ctx = tracing.TraceContext(
+            company_id=company_id, session_id=session_id,
+            parent_span_id=None,    # could be the manager's span; left None for flat-ish view
+            agent_name=agent_name,
+        )
+        token = None
         try:
-            async for ev in worker.run(action, resolved_input, task_id=task_key):
-                await event_queue.put(ev)
-                if ev.type == "done":
-                    final_output = ev.content
-        except Exception as e:
-            err = f"{type(e).__name__}: {e}"
-            task_queue.mark_error(db, db_task_id, err)
-            await event_queue.put(WorkerEvent("error", agent_name, err, task_key))
-            outputs[task_key] = {"error": err}
-            return
+            from app.cost.tracing import _current
+            token = _current.set(worker_ctx)
+            final_output = None
+            try:
+                async for ev in worker.run(action, resolved_input, task_id=task_key):
+                    await event_queue.put(ev)
+                    if ev.type == "done":
+                        final_output = ev.content
+            except Exception as e:
+                err = f"{type(e).__name__}: {e}"
+                task_queue.mark_error(db, db_task_id, err)
+                await event_queue.put(WorkerEvent("error", agent_name, err, task_key))
+                outputs[task_key] = {"error": err}
+                return
+        finally:
+            if token is not None:
+                from app.cost.tracing import _current
+                _current.reset(token)
 
         outputs[task_key] = final_output or {}
-        task_queue.mark_ok(db, db_task_id,
-                           outputs[task_key] if isinstance(outputs[task_key], dict)
-                           else {"value": outputs[task_key]})
+        out_payload = outputs[task_key] if isinstance(outputs[task_key], dict) else {"value": outputs[task_key]}
+        task_queue.mark_ok(db, db_task_id, out_payload)
         await event_queue.put(WorkerEvent("status", agent_name,
-                                          {"task_key": task_key, "status": "ok"}, task_key))
+                                           {"task_key": task_key, "status": "ok"}, task_key))
     finally:
         db.close()
 
 
-async def _execute_dag(tasks: list[dict], db_task_ids: dict, event_queue: asyncio.Queue,
-                       company_id: int) -> dict:
-    outputs: dict = {}
+async def _execute_dag(tasks, db_task_ids, event_queue, company_id, session_id):
+    outputs = {}
     remaining = {t["id"]: t for t in tasks}
-    in_flight: dict[str, asyncio.Task] = {}
+    in_flight = {}
 
     while remaining or in_flight:
         for tid in list(remaining.keys()):
             t = remaining[tid]
-            deps = t.get("depends_on") or []
-            if all(d in outputs for d in deps):
+            if all(d in outputs for d in (t.get("depends_on") or [])):
                 fut = asyncio.create_task(
-                    _run_one_task(t, db_task_ids[tid], outputs, event_queue, company_id)
+                    _run_one_task(t, db_task_ids[tid], outputs, event_queue,
+                                  company_id, session_id)
                 )
                 in_flight[tid] = fut
                 del remaining[tid]
-
         if not in_flight:
             for tid, t in remaining.items():
-                await event_queue.put(WorkerEvent(
-                    "error", "manager",
-                    f"Task {tid} skipped — unresolved deps: {t.get('depends_on')}", tid,
-                ))
+                await event_queue.put(WorkerEvent("error", "manager",
+                    f"Task {tid} skipped — unresolved deps: {t.get('depends_on')}", tid))
             break
-
         done, _ = await asyncio.wait(in_flight.values(), return_when=asyncio.FIRST_COMPLETED)
         for fut in done:
             for tid, f in list(in_flight.items()):
                 if f is fut:
-                    del in_flight[tid]
-                    break
+                    del in_flight[tid]; break
 
     return outputs
 
 
 async def run_manager(session_id: int, user_message: str,
                       company_id: int, user_id: int) -> AsyncGenerator[dict, None]:
-    """Run a full manager turn — company-scoped."""
-    db = SessionLocal()
-    try:
-        db.add(AgentMessage(session_id=session_id, role="user", content=user_message))
-        db.commit()
-    finally:
-        db.close()
-
-    yield {"type": "manager_start", "agent": "manager", "content": "Planning..."}
-
-    sys_prompt = PLAN_SYSTEM_PROMPT.format(capabilities=registry.capabilities_prompt())
-    llm = get_llm(temperature=0.2)
-    plan_resp = await asyncio.to_thread(
-        llm.invoke,
-        [SystemMessage(content=sys_prompt), HumanMessage(content=user_message)],
+    """Run a manager turn. Sets the trace context for the duration."""
+    # Set top-level trace context. Workers will swap their own in/out around it.
+    manager_ctx = tracing.TraceContext(
+        company_id=company_id, session_id=session_id,
+        parent_span_id=None, agent_name="manager",
     )
+    from app.cost.tracing import _current
+    top_token = _current.set(manager_ctx)
+
     try:
-        plan = parse_json_lenient(plan_resp.content)
-    except Exception as e:
-        yield {"type": "error", "agent": "manager",
-               "content": f"Failed to parse plan: {e}\nRaw: {plan_resp.content[:300]}"}
-        return
-
-    tasks = plan.get("tasks", []) or []
-    reply_hint = plan.get("reply_hint", "")
-    yield {"type": "plan", "agent": "manager",
-           "content": {"tasks": tasks, "reply_hint": reply_hint}}
-
-    if not tasks:
         db = SessionLocal()
         try:
-            db.add(AgentMessage(session_id=session_id, role="manager",
-                                content=reply_hint or "Got it."))
+            db.add(AgentMessage(session_id=session_id, role="user", content=user_message))
             db.commit()
         finally:
             db.close()
-        yield {"type": "manager_reply", "agent": "manager",
-               "content": reply_hint or "Got it."}
-        return
 
-    db_task_ids: dict[str, int] = {}
-    db = SessionLocal()
-    try:
-        for t in tasks:
-            tid = task_queue.create_task(
-                db, session_id=session_id, task_key=t["id"], agent_name=t["agent"],
-                action=t["action"], input_json=t.get("input") or {},
-                depends_on=t.get("depends_on") or [],
-            )
-            db_task_ids[t["id"]] = tid
-    finally:
-        db.close()
+        yield {"type": "manager_start", "agent": "manager", "content": "Planning..."}
 
-    event_queue: asyncio.Queue = asyncio.Queue()
-
-    async def runner():
+        sys_prompt = PLAN_SYSTEM_PROMPT.format(capabilities=registry.capabilities_prompt())
+        plan_result = await route_llm(sys_prompt, user_message,
+                                       tier="cheap", agent_name="manager")
         try:
-            outs = await _execute_dag(tasks, db_task_ids, event_queue, company_id)
-            await event_queue.put({"__final__": outs})
+            plan = parse_json_lenient(plan_result.content)
         except Exception as e:
-            await event_queue.put(WorkerEvent("error", "manager", str(e)))
-            await event_queue.put({"__final__": {}})
+            yield {"type": "error", "agent": "manager",
+                   "content": f"Failed to parse plan: {e}\nRaw: {plan_result.content[:300]}"}
+            return
 
-    runner_task = asyncio.create_task(runner())
+        tasks = plan.get("tasks", []) or []
+        reply_hint = plan.get("reply_hint", "")
+        yield {"type": "plan", "agent": "manager",
+               "content": {"tasks": tasks, "reply_hint": reply_hint,
+                           "_router": {"model": plan_result.model_used,
+                                       "cost_usd": plan_result.cost_usd,
+                                       "cache_hit": plan_result.was_cache_hit}}}
 
-    final_outputs = None
-    while True:
-        item = await event_queue.get()
-        if isinstance(item, dict) and "__final__" in item:
-            final_outputs = item["__final__"]
-            break
-        if isinstance(item, WorkerEvent):
-            yield item.to_dict()
-        else:
-            yield item
+        if not tasks:
+            db = SessionLocal()
+            try:
+                db.add(AgentMessage(session_id=session_id, role="manager",
+                                    content=reply_hint or "Got it."))
+                db.commit()
+            finally:
+                db.close()
+            yield {"type": "manager_reply", "agent": "manager",
+                   "content": reply_hint or "Got it."}
+            return
 
-    await runner_task
+        # Persist tasks
+        db_task_ids = {}
+        db = SessionLocal()
+        try:
+            for t in tasks:
+                tid = task_queue.create_task(
+                    db, session_id=session_id, task_key=t["id"],
+                    agent_name=t["agent"], action=t["action"],
+                    input_json=t.get("input") or {},
+                    depends_on=t.get("depends_on") or [],
+                )
+                db_task_ids[t["id"]] = tid
+        finally:
+            db.close()
 
-    yield {"type": "aggregating", "agent": "manager", "content": "Synthesizing reply..."}
-    summary_input = {
-        "user_message": user_message,
-        "reply_hint": reply_hint,
-        "task_outputs": final_outputs or {},
-    }
-    agg_resp = await asyncio.to_thread(
-        llm.invoke,
-        [SystemMessage(content=AGGREGATE_SYSTEM_PROMPT),
-         HumanMessage(content=json.dumps(summary_input, default=str)[:8000])],
-    )
-    reply = agg_resp.content.strip()
+        # Execute
+        event_queue = asyncio.Queue()
 
-    db = SessionLocal()
-    try:
-        db.add(AgentMessage(session_id=session_id, role="manager", content=reply,
-                            metadata_json={"task_count": len(tasks)}))
-        db.commit()
+        async def runner():
+            try:
+                outs = await _execute_dag(tasks, db_task_ids, event_queue,
+                                          company_id, session_id)
+                await event_queue.put({"__final__": outs})
+            except Exception as e:
+                await event_queue.put(WorkerEvent("error", "manager", str(e)))
+                await event_queue.put({"__final__": {}})
+
+        runner_task = asyncio.create_task(runner())
+        final_outputs = None
+        while True:
+            item = await event_queue.get()
+            if isinstance(item, dict) and "__final__" in item:
+                final_outputs = item["__final__"]; break
+            if isinstance(item, WorkerEvent):
+                yield item.to_dict()
+            else:
+                yield item
+        await runner_task
+
+        # Aggregate
+        yield {"type": "aggregating", "agent": "manager", "content": "Synthesizing reply..."}
+        summary_input = {
+            "user_message": user_message,
+            "reply_hint": reply_hint,
+            "task_outputs": final_outputs or {},
+        }
+        agg_result = await route_llm(
+            AGGREGATE_SYSTEM_PROMPT,
+            json.dumps(summary_input, default=str)[:8000],
+            tier="quality", agent_name="manager",
+        )
+        reply = agg_result.content.strip()
+
+        db = SessionLocal()
+        try:
+            db.add(AgentMessage(session_id=session_id, role="manager", content=reply,
+                                metadata_json={"task_count": len(tasks),
+                                                "router": {
+                                                    "model": agg_result.model_used,
+                                                    "cost_usd": agg_result.cost_usd,
+                                                    "cache_hit": agg_result.was_cache_hit,
+                                                }}))
+            db.commit()
+        finally:
+            db.close()
+
+        yield {"type": "manager_reply", "agent": "manager", "content": reply,
+               "_router": {"model": agg_result.model_used,
+                           "cost_usd": agg_result.cost_usd,
+                           "cache_hit": agg_result.was_cache_hit}}
     finally:
-        db.close()
-
-    yield {"type": "manager_reply", "agent": "manager", "content": reply}
+        _current.reset(top_token)
