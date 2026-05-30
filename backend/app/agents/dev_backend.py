@@ -1,10 +1,7 @@
-"""Backend developer agent — produces API/DB specs, schema designs, server-side logic plans."""
+"""Backend developer agent — Phase 4 routed."""
 from __future__ import annotations
-import asyncio
 from typing import AsyncGenerator
-from langchain_core.messages import HumanMessage, SystemMessage
-
-from app.agents.base import Worker, WorkerSpec, WorkerEvent, get_llm
+from app.agents.base import Worker, WorkerSpec, WorkerEvent, route_llm
 from app.tools.dev_tools import make_spec_artifact
 
 
@@ -21,6 +18,10 @@ SPEC = WorkerSpec(
 )
 
 
+# Quality tier — dev specs are user-visible and worth nicer prose if cloud is on
+ACTION_TIER = "standard"   # bump to "quality" if you want polished output
+
+
 class BackendDevWorker:
     spec = SPEC
 
@@ -29,8 +30,7 @@ class BackendDevWorker:
             "design_endpoint": (
                 "You are a senior backend engineer. Produce a FastAPI endpoint spec. "
                 "Include: route, method, Pydantic request model, Pydantic response model, "
-                "DB tables touched, edge cases, and a brief implementation sketch. "
-                "Markdown formatted."
+                "DB tables touched, edge cases, and a brief implementation sketch. Markdown."
             ),
             "design_schema": (
                 "You are a senior backend engineer. Produce a Postgres schema. "
@@ -49,15 +49,16 @@ class BackendDevWorker:
 
         spec_text = input.get("spec") or input.get("description") or ""
         if not spec_text:
-            yield WorkerEvent("error", self.spec.name, "Missing 'spec' or 'description' in input", task_id)
+            yield WorkerEvent("error", self.spec.name, "Missing 'spec' or 'description'", task_id)
             return
 
         yield WorkerEvent("thinking", self.spec.name, f"Working on: {action}", task_id)
 
-        llm = get_llm(temperature=0.3)
-        resp = await asyncio.to_thread(
-            llm.invoke,
-            [SystemMessage(content=prompt_map[action]), HumanMessage(content=spec_text)],
-        )
-        artifact = make_spec_artifact(title=action, body=resp.content.strip())
+        result = await route_llm(prompt_map[action], spec_text, tier=ACTION_TIER,
+                                  agent_name=self.spec.name)
+        artifact = make_spec_artifact(title=action, body=result.content.strip())
+        artifact["_router"] = {
+            "model": result.model_used, "cost_usd": result.cost_usd,
+            "latency_ms": result.latency_ms, "cache_hit": result.was_cache_hit,
+        }
         yield WorkerEvent("done", self.spec.name, artifact, task_id)
