@@ -1,10 +1,7 @@
-"""Frontend developer agent — React component specs, CSS, UX flows."""
+"""Frontend developer agent — Phase 4 routed."""
 from __future__ import annotations
-import asyncio
 from typing import AsyncGenerator
-from langchain_core.messages import HumanMessage, SystemMessage
-
-from app.agents.base import Worker, WorkerSpec, WorkerEvent, get_llm
+from app.agents.base import Worker, WorkerSpec, WorkerEvent, route_llm
 from app.tools.dev_tools import make_spec_artifact
 
 
@@ -20,6 +17,8 @@ SPEC = WorkerSpec(
     ),
 )
 
+ACTION_TIER = "standard"
+
 
 class FrontendDevWorker:
     spec = SPEC
@@ -28,18 +27,16 @@ class FrontendDevWorker:
         prompt_map = {
             "design_component": (
                 "You are a senior frontend engineer. Produce a React component spec. "
-                "Include: component name, props (with types), states, handlers, accessibility "
-                "considerations, and a brief render-tree sketch. Markdown."
+                "Include: component name, props (with types), states, handlers, accessibility, "
+                "and a render-tree sketch. Markdown."
             ),
             "design_flow": (
                 "You are a senior frontend engineer. Describe a user flow across screens. "
-                "Include: screens listed in order, what changes at each, decision points, "
-                "loading/error states. Markdown."
+                "Include screens in order, what changes at each, decisions, loading/error states."
             ),
             "write_component": (
                 "You are a senior frontend engineer. Write a full React functional component "
-                "using hooks. Include: the component code in a single markdown code block, "
-                "followed by a short usage example."
+                "with hooks. Include code in one markdown block plus a short usage example."
             ),
         }
         if action not in prompt_map:
@@ -53,10 +50,11 @@ class FrontendDevWorker:
 
         yield WorkerEvent("thinking", self.spec.name, f"Working on: {action}", task_id)
 
-        llm = get_llm(temperature=0.4)
-        resp = await asyncio.to_thread(
-            llm.invoke,
-            [SystemMessage(content=prompt_map[action]), HumanMessage(content=spec_text)],
-        )
-        artifact = make_spec_artifact(title=action, body=resp.content.strip())
+        result = await route_llm(prompt_map[action], spec_text, tier=ACTION_TIER,
+                                  agent_name=self.spec.name)
+        artifact = make_spec_artifact(title=action, body=result.content.strip())
+        artifact["_router"] = {
+            "model": result.model_used, "cost_usd": result.cost_usd,
+            "latency_ms": result.latency_ms, "cache_hit": result.was_cache_hit,
+        }
         yield WorkerEvent("done", self.spec.name, artifact, task_id)
