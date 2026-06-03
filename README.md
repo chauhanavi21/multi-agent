@@ -1,109 +1,97 @@
-# Phase 3 — Users, companies, boss admin, data isolation
+# Phase 5 — AWS deployment + Bedrock support
 
-Builds on Phase 1 + Phase 2. Adds the **product layer**:
+Builds on Phase 1+2+3+4. Adds:
 
-- **Users + auth** — sign up, sign in, JWT tokens
-- **Companies** — every user owns exactly one company with the **fixed org chart** (manager + 3 devs + sales + analyst)
-- **Data isolation** — leads, drafts, chat sessions, tasks all scoped to the user's company
-- **Boss admin role** — `is_admin=true` flag; bypasses isolation, can manage users, edit the org chart template
-- **Company workspace UI** — login screen, top bar with company name + user menu, agent roster sidebar showing the team
+- **Bedrock provider** in the model router (alongside Anthropic direct + Ollama)
+- **Per-company `cloud_provider`** setting (`anthropic` | `bedrock`), toggled in the admin panel
+- **Configurable Ollama URL** — so `OLLAMA_BASE_URL` can point at localhost OR a Tailscale tunnel back to your home machine
+- **Terraform module** for full AWS stack: VPC, EC2 t3.micro, RDS db.t3.micro, two S3 buckets, IAM role, SSM params, security groups
+- **EC2 user-data** that bootstraps the box on first boot: installs Python/Redis/Caddy, fetches secrets from SSM, pulls app code from S3, runs migrations, starts systemd service
+- **Deploy script** that builds the frontend, packs the backend, and refreshes EC2 in one command
+- **Caddy** reverse proxy with auto-HTTPS (self-signed for IP-only mode; Let's Encrypt the moment you point a domain at it)
+- **Backup script** for nightly pg_dump to S3 with 30-day retention
+- **Runbook** with operational procedures, debugging, and the genuinely awkward bits (like "t3.micro can't run llama3.1:8b")
 
-Phase 1 endpoints (`/api/leads`, draft email) now require auth and filter by company.
-Phase 2 endpoints (chat, tasks) same — but the chat sessions belong to the company.
-
-## Install on top of Phase 1 + 2
-
-Same pattern as Phase 2 — unzip over your existing project:
+## Install on top of Phase 1+2+3+4
 
 ```bash
-cd ~/path/to/phase1            # your merged Phase 1+2 dir
-unzip -o ~/Downloads/phase3-users-companies.zip
-cp -r phase3/* .
-rm -rf phase3
+cd ~/path/to/phase1
+unzip -o ~/Downloads/phase5-aws-deployment.zip
+cp -r phase5/* . && rm -rf phase5
 ```
 
-Files **added**:
-- `backend/app/db/migrate_phase3.py` — users, companies, company_members tables + adds `company_id` to existing tables
-- `backend/app/auth/security.py` — password hashing, JWT
-- `backend/app/auth/deps.py` — FastAPI dependencies for current_user, current_company
-- `backend/app/routes/auth_routes.py`
-- `backend/app/routes/company_routes.py`
-- `backend/app/routes/admin_routes.py`
-- `frontend/src/auth/AuthContext.jsx`
-- `frontend/src/auth/LoginScreen.jsx`
-- `frontend/src/components/TopBar.jsx`
-- `frontend/src/components/TeamRoster.jsx`
-- `frontend/src/components/AdminPanel.jsx`
+## Local setup (verify Phase 5 backend changes work before deploying)
 
-Files **replaced**:
-- `backend/requirements.txt` — adds `passlib[bcrypt]` and `python-jose[cryptography]`
-- `backend/app/config.py` — adds JWT secret + token TTL
-- `backend/app/main.py` — wires auth, mounts new routers, adds isolation guards to existing routes
-- `backend/app/tools/lead_tools.py` — every query takes `company_id`
-- `backend/app/tools/email_tools.py` — joins through Lead to enforce company scope
-- `backend/app/agents/manager.py` — passes `company_id` into worker context
-- `backend/app/agents/sales_agent.py` — uses company-scoped tools
-- `frontend/src/App.jsx` — routes between login screen and main app
-- `frontend/src/api/client.js` — sends auth header on every request
-- `frontend/src/styles.css` — login screen + top bar styles
-
-## Setup steps
-
-1. Stop your backend if running.
-2. Install new Python deps:
-   ```bash
-   cd backend && source venv/bin/activate
-   pip install -r requirements.txt
-   ```
-3. Pick a JWT secret. Create `backend/.env`:
-   ```
-   JWT_SECRET=change-me-to-something-random-and-long
-   ```
-   (Or just let the default dev secret stay — fine for local.)
-4. Run the Phase 3 migration:
-   ```bash
-   python -m app.db.migrate_phase3
-   ```
-   This adds `users`, `companies`, `company_members`, plus a nullable `company_id` column on `leads`, `email_drafts`, `chat_sessions`. Existing Phase 1+2 data stays.
-5. Bootstrap the first user (the boss):
-   ```bash
-   python -m app.db.bootstrap_admin
-   ```
-   This creates a default admin: `boss@local.dev` / `bosspass`. Change the password from the UI after first login.
-6. Start the backend: `uvicorn app.main:app --reload --port 8000`
-7. Refresh the frontend (or `npm run dev`).
-
-## What you'll see
-
-1. **Login screen** loads first.
-2. **Sign up** as a normal user — your company gets created automatically with the fixed team.
-3. Top bar shows your company name + the team roster on the left.
-4. Phase 1 lead list, Phase 2 chat panel — all your data is isolated to your company.
-5. Sign in as `boss@local` to see the **admin panel** (extra route in the top bar): user list, company list, ability to suspend users.
-
-## The locked org chart
-
-When a user signs up, this is created server-side and **cannot be modified by the user**:
-
-```
-company {
-  manager        (1 agent)
-  sales          (1 agent)
-  dev_backend    (1 agent)
-  dev_frontend   (1 agent)
-  dev_qa         (1 agent)
-  social_analyst (1 agent)
-}
+```bash
+cd backend && source venv/bin/activate
+pip install -r requirements.txt          # adds boto3, gunicorn
+python -m app.db.migrate_phase5          # adds cloud_provider column to companies
+uvicorn app.main:app --reload --port 8000
 ```
 
-The template lives in `backend/app/db/org_chart.py`. Users have read-only access. Only `is_admin=true` users can mutate it via `/api/admin/template`.
+Visit the admin panel — companies tab now has a **Provider** dropdown.
 
-## Data isolation model
+## AWS deployment
 
-Every query that returns user-visible data has a `WHERE company_id = :company_id` clause. The dependency `get_current_company()` resolves the company from the JWT, and FastAPI's `Depends()` system injects it everywhere.
+See `deploy/PHASE5_RUNBOOK.md` for the full walkthrough. Short version:
 
-Boss admin bypasses isolation via a separate dependency `get_company_or_admin_override()` that accepts an optional `?company_id=X` query param for admins only.
+```bash
+# 1. Enable Bedrock model access for anthropic.claude-haiku-4-5 and claude-sonnet-4-5
+#    in the AWS console (free, but required)
+# 2. Apply infra
+cd infra/terraform
+cp terraform.tfvars.example terraform.tfvars
+# edit terraform.tfvars (set ssh_cidr to your IP/32 at minimum)
+terraform init && terraform apply
+# 3. Deploy code
+cd ../.. && deploy/deploy.sh
+# 4. Verify
+curl -k https://$(terraform -chdir=infra/terraform output -raw app_public_ip)/api/health
+```
 
-## Phase 4 preview
+## What's in this zip
 
-Phase 4 is cost optimization + observability — the model router, semantic cache, per-company token budgets, and reusing AgentLens for tracing. The `company_id` you have now is exactly the unit budgets will be applied to.
+```
+phase5/
+├── backend/
+│   ├── requirements.txt            # adds boto3, gunicorn
+│   └── app/
+│       ├── config.py               # adds bedrock_* + ollama_base_url is now meaningful
+│       ├── main.py                 # imports model_extensions_p5
+│       ├── cost/
+│       │   ├── pricing.py          # adds bedrock model IDs
+│       │   └── router.py           # adds _call_bedrock(), per-company provider selection
+│       ├── db/
+│       │   ├── migrate_phase5.py   # adds companies.cloud_provider
+│       │   └── model_extensions_p5.py
+│       └── routes/
+│           └── admin_routes.py     # adds PUT /admin/companies/{id}/cloud_provider
+├── frontend/src/
+│   ├── api/client.js               # adds adminSetProvider
+│   └── components/
+│       └── AdminPanel.jsx          # adds Provider dropdown column
+├── infra/terraform/
+│   ├── versions.tf
+│   ├── variables.tf
+│   ├── terraform.tfvars.example    # COPY THIS to terraform.tfvars
+│   ├── vpc.tf
+│   ├── ec2.tf
+│   ├── rds.tf
+│   ├── s3.tf
+│   ├── iam.tf
+│   ├── ssm.tf
+│   ├── outputs.tf
+│   └── user_data.sh
+└── deploy/
+    ├── deploy.sh
+    ├── backup.sh
+    ├── Caddyfile
+    └── PHASE5_RUNBOOK.md           # READ THIS BEFORE terraform apply
+```
+
+## Key tradeoffs documented in the runbook
+
+- t3.micro can't run llama3.1:8b → three workarounds (all cloud / Tailscale to home / Bedrock for everything)
+- RDS in public subnets without NAT gateway saves $32/mo vs the "textbook" private-subnet design
+- S3 static hosting with public read for the frontend (no CloudFront yet)
+- Self-signed cert until you point a domain (then Caddy auto-issues Let's Encrypt)
