@@ -13,15 +13,13 @@ export default function TopBar({ view, onChangeView }) {
           <span>{company?.name || 'No company'}</span>
         </div>
         <div className="topbar-tabs">
-          <button
-            className={view === 'workspace' ? 'tabchip tabchip-active' : 'tabchip'}
-            onClick={() => onChangeView('workspace')}
-          >Workspace</button>
+          <button className={view === 'workspace' ? 'tabchip tabchip-active' : 'tabchip'}
+                  onClick={() => onChangeView('workspace')}>Workspace</button>
+          <button className={view === 'observability' ? 'tabchip tabchip-active' : 'tabchip'}
+                  onClick={() => onChangeView('observability')}>Observability</button>
           {user?.is_admin && (
-            <button
-              className={view === 'admin' ? 'tabchip tabchip-active' : 'tabchip'}
-              onClick={() => onChangeView('admin')}
-            >Admin</button>
+            <button className={view === 'admin' ? 'tabchip tabchip-active' : 'tabchip'}
+                    onClick={() => onChangeView('admin')}>Admin</button>
           )}
         </div>
       </div>
