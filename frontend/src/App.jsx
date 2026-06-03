@@ -9,28 +9,26 @@ import ChatPanel from './components/ChatPanel'
 import TopBar from './components/TopBar'
 import TeamRoster from './components/TeamRoster'
 import AdminPanel from './components/AdminPanel'
+import ObservabilityPanel from './components/ObservabilityPanel'
+import CostCard from './components/CostCard'
 
 export default function App() {
   const { user, loading } = useAuth()
   const [view, setView] = useState('workspace')
 
-  // Auth gate
-  if (loading) {
-    return <div className="empty" style={{ height: '100vh' }}>Loading...</div>
-  }
-  if (!user) {
-    return <LoginScreen />
-  }
+  if (loading) return <div className="empty" style={{ height: '100vh' }}>Loading...</div>
+  if (!user) return <LoginScreen />
 
-  // Admin without a company can only see admin view
-  const effectiveView = (user.is_admin && !user.company_id && view !== 'admin') ? 'admin' : view
+  const effectiveView = (user.is_admin && !user.company_id && view === 'workspace') ? 'admin' : view
 
   return (
     <div className="appshell">
       <TopBar view={effectiveView} onChangeView={setView} />
       {effectiveView === 'admin'
         ? <AdminPanel />
-        : <Workspace />}
+        : effectiveView === 'observability'
+          ? <ObservabilityPanel />
+          : <Workspace />}
     </div>
   )
 }
@@ -44,68 +42,58 @@ function Workspace() {
   const [criteria, setCriteria] = useState('Fintech startups in Series A')
 
   const refreshLeads = useCallback(async () => {
-    const data = await api.listLeads()
-    setLeads(data)
-    return data
+    const data = await api.listLeads(); setLeads(data); return data
   }, [])
 
   const refreshDrafts = useCallback(async (leadId) => {
     if (!leadId) { setDrafts([]); return }
-    const d = await api.listDrafts(leadId)
-    setDrafts(d)
+    const d = await api.listDrafts(leadId); setDrafts(d)
   }, [])
 
   useEffect(() => { refreshLeads() }, [refreshLeads])
-  useEffect(() => {
-    refreshDrafts(selectedId)
-    setEvents([])
-  }, [selectedId, refreshDrafts])
+  useEffect(() => { refreshDrafts(selectedId); setEvents([]) }, [selectedId, refreshDrafts])
 
   const selectedLead = leads.find((l) => l.id === selectedId)
 
   async function draftEmail() {
     if (!selectedId || busy) return
-    setBusy(true)
-    setEvents([{ type: 'tool', content: 'Starting agent...' }])
+    setBusy(true); setEvents([{ type: 'tool', content: 'Starting agent...' }])
     try {
       for await (const ev of api.streamAgent('/agents/sales/draft_email', { lead_id: selectedId })) {
         setEvents((prev) => [...prev, ev])
       }
       await refreshDrafts(selectedId)
-    } catch (e) {
-      setEvents((prev) => [...prev, { type: 'error', content: String(e) }])
-    } finally { setBusy(false) }
+    } catch (e) { setEvents((prev) => [...prev, { type: 'error', content: String(e) }]) }
+    finally { setBusy(false) }
   }
 
   async function generateLeads() {
     if (!criteria.trim() || busy) return
-    setBusy(true)
-    setEvents([{ type: 'tool', content: `Generating leads for: ${criteria}` }])
+    setBusy(true); setEvents([{ type: 'tool', content: `Generating leads for: ${criteria}` }])
     try {
       for await (const ev of api.streamAgent('/agents/sales/generate_leads', { criteria })) {
         setEvents((prev) => [...prev, ev])
       }
       await refreshLeads()
-    } catch (e) {
-      setEvents((prev) => [...prev, { type: 'error', content: String(e) }])
-    } finally { setBusy(false) }
+    } catch (e) { setEvents((prev) => [...prev, { type: 'error', content: String(e) }]) }
+    finally { setBusy(false) }
   }
 
   async function handleSend(draftId) {
-    await api.sendDraft(draftId)
-    await refreshDrafts(selectedId)
-    await refreshLeads()
+    await api.sendDraft(draftId); await refreshDrafts(selectedId); await refreshLeads()
   }
-
   async function handleUpdate(draftId, subject, body) {
-    await api.updateDraft(draftId, subject, body)
-    await refreshDrafts(selectedId)
+    await api.updateDraft(draftId, subject, body); await refreshDrafts(selectedId)
   }
 
   return (
     <div className="app app-phase3">
       <aside className="sidebar">
         <TeamRoster />
+        <div className="sidebar-divider" />
+        <div className="sidebar-actions">
+          <CostCard />
+        </div>
         <div className="sidebar-divider" />
         <div className="sidebar-actions">
           <input
@@ -152,19 +140,12 @@ function Workspace() {
                   </span>
                 </div>
               </div>
-
               {events.length > 0 && <AgentStream events={events} />}
-
               {drafts.length === 0 ? (
-                <div className="dim" style={{ textAlign: 'center', padding: 24 }}>
-                  No drafts yet.
-                </div>
+                <div className="dim" style={{ textAlign: 'center', padding: 24 }}>No drafts yet.</div>
               ) : (
                 drafts.map((d) => (
-                  <EmailEditor
-                    key={d.id} draft={d}
-                    onSend={handleSend} onUpdate={handleUpdate}
-                  />
+                  <EmailEditor key={d.id} draft={d} onSend={handleSend} onUpdate={handleUpdate} />
                 ))
               )}
             </div>
