@@ -1,10 +1,7 @@
 const BASE = 'http://localhost:8000/api'
 const TOKEN_KEY = 'sa.token'
 
-export function getToken() {
-  return localStorage.getItem(TOKEN_KEY)
-}
-
+export function getToken() { return localStorage.getItem(TOKEN_KEY) }
 export function setToken(token) {
   if (token) localStorage.setItem(TOKEN_KEY, token)
   else localStorage.removeItem(TOKEN_KEY)
@@ -17,16 +14,11 @@ function authHeaders() {
 
 async function http(path, opts = {}) {
   const res = await fetch(`${BASE}${path}`, {
-    headers: {
-      'Content-Type': 'application/json',
-      ...authHeaders(),
-      ...(opts.headers || {}),
-    },
+    headers: { 'Content-Type': 'application/json', ...authHeaders(), ...(opts.headers || {}) },
     ...opts,
   })
   if (res.status === 401) {
-    setToken(null)
-    window.location.reload()
+    setToken(null); window.location.reload()
     throw new Error('Unauthorized')
   }
   if (!res.ok) {
@@ -38,16 +30,13 @@ async function http(path, opts = {}) {
 }
 
 export const api = {
-  // Auth
   signup: (data) => http('/auth/signup', { method: 'POST', body: JSON.stringify(data) }),
   login: (data) => http('/auth/login', { method: 'POST', body: JSON.stringify(data) }),
   me: () => http('/auth/me'),
 
-  // Company
   myCompany: () => http('/company/me'),
   myTeam: () => http('/company/team'),
 
-  // Leads (Phase 1, now scoped)
   listLeads: () => http('/leads'),
   getLead: (id) => http(`/leads/${id}`),
   setStatus: (id, status) =>
@@ -57,34 +46,40 @@ export const api = {
     http(`/drafts/${id}`, { method: 'PUT', body: JSON.stringify({ subject, body }) }),
   sendDraft: (id) => http(`/drafts/${id}/send`, { method: 'POST' }),
 
-  // Chat (Phase 2, now scoped)
   createSession: (title) =>
     http('/chat/sessions', { method: 'POST', body: JSON.stringify({ title }) }),
   listSessions: () => http('/chat/sessions'),
   sessionTasks: (id) => http(`/chat/sessions/${id}/tasks`),
 
-  // Admin
   adminUsers: () => http('/admin/users'),
   adminCompanies: () => http('/admin/companies'),
   adminSetActive: (userId, isActive) =>
     http(`/admin/users/${userId}/active`, {
-      method: 'PUT', body: JSON.stringify({ is_active: isActive }),
-    }),
+      method: 'PUT', body: JSON.stringify({ is_active: isActive }) }),
+  adminSetCloud: (companyId, useCloud) =>
+    http(`/admin/companies/${companyId}/cloud`, {
+      method: 'PUT', body: JSON.stringify({ use_cloud_api: useCloud }) }),
+  adminSetBudget: (companyId, budget) =>
+    http(`/admin/companies/${companyId}/budget`, {
+      method: 'PUT', body: JSON.stringify({ monthly_budget_usd: budget }) }),
+  adminSetProvider: (companyId, provider) =>
+    http(`/admin/companies/${companyId}/cloud_provider`, {
+      method: 'PUT', body: JSON.stringify({ cloud_provider: provider }) }),
 
-  /**
-   * Stream an SSE response from a POST.
-   */
+  costSummary: () => http('/observability/cost/summary'),
+  costTimeseries: (days = 14) => http(`/observability/cost/timeseries?days=${days}`),
+  recentTraces: (limit = 100) => http(`/observability/traces/recent?limit=${limit}`),
+  sessionTraces: (sessionId) => http(`/observability/traces/session/${sessionId}`),
+  cacheStats: () => http('/observability/cache/stats'),
+  clearCache: () => http('/observability/cache', { method: 'DELETE' }),
+
   async *streamAgent(path, payload) {
     const res = await fetch(`${BASE}${path}`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json', ...authHeaders() },
       body: JSON.stringify(payload),
     })
-    if (res.status === 401) {
-      setToken(null)
-      window.location.reload()
-      throw new Error('Unauthorized')
-    }
+    if (res.status === 401) { setToken(null); window.location.reload(); throw new Error('Unauthorized') }
     if (!res.ok) throw new Error(`${res.status} ${res.statusText}`)
     const reader = res.body.getReader()
     const decoder = new TextDecoder()
