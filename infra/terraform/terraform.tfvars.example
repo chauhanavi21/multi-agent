@@ -1,0 +1,24 @@
+# Copy to terraform.tfvars and customize before running `terraform apply`.
+
+project                  = "sales-agent"
+region                   = "us-east-1"
+instance_type            = "t3.micro"
+db_instance_type         = "db.t3.micro"
+
+# IMPORTANT: lock down SSH to your own IP. Find it via `curl ifconfig.me`.
+ssh_cidr                 = "203.0.113.42/32"
+public_key_path          = "~/.ssh/id_ed25519.pub"
+
+# Optional — only used by companies whose cloud_provider == 'anthropic'.
+# Companies set to 'bedrock' use the EC2 IAM role instead.
+anthropic_api_key        = ""
+
+# The bootstrap admin you'll log in as. CHANGE THIS PASSWORD.
+bootstrap_admin_email    = "boss@yourdomain.com"
+bootstrap_admin_password = "change-this-to-a-strong-password"
+
+# Optional: if you want EC2 to join your tailnet so it can call Ollama on your laptop.
+# Generate at https://login.tailscale.com/admin/settings/keys (reusable, 90-day).
+# After EC2 boots, set OLLAMA_BASE_URL in /opt/sales-agent/backend/.env to the
+# tailscale IP of your home machine.
+tailscale_auth_key       = ""
