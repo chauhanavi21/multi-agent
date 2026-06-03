@@ -1,0 +1,32 @@
+# Caddyfile for Sales Agent
+#
+# Two modes:
+#
+# A) IP-only (no domain yet). Browser will warn about self-signed cert.
+#    This is the default that user_data installs.
+#
+# B) Real domain (recommended). Replace the :443 block below with your hostname:
+#       sales.yourdomain.com {
+#         tls you@yourdomain.com
+#         reverse_proxy 127.0.0.1:8000
+#       }
+#    Caddy will fetch a Let's Encrypt cert automatically on first request.
+
+{
+  # email you@yourdomain.com   # uncomment when you have a domain
+}
+
+# --- Mode A (default): IP-only with self-signed cert ---
+:443 {
+  tls internal
+  reverse_proxy 127.0.0.1:8000
+}
+
+:80 {
+  redir https://{host}{uri}
+}
+
+# --- Mode B (replace the above two blocks with this once you have a domain): ---
+# sales.yourdomain.com {
+#   reverse_proxy 127.0.0.1:8000
+# }
