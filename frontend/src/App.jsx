@@ -18,20 +18,21 @@ import LegalBanner from './components/LegalBanner'
 import { SHORT_AI_WARNING } from './legal/legalContent'
 
 export default function App() {
-  const { user, loading } = useAuth()
+  const { user, loading, refresh } = useAuth()
   const [view, setView] = useState('workspace')
   const [billingNotice, setBillingNotice] = useState(null)
 
   useEffect(() => {
     const params = new URLSearchParams(window.location.search)
     if (params.get('billing') === 'success') {
-      setBillingNotice('Payment received. Your plan will update shortly — refresh if needed.')
+      setBillingNotice('Payment received. Your plan will update shortly.')
       window.history.replaceState({}, '', window.location.pathname)
+      refresh()
     } else if (params.get('billing') === 'cancel') {
       setBillingNotice('Checkout cancelled. No charge was made.')
       window.history.replaceState({}, '', window.location.pathname)
     }
-  }, [])
+  }, [refresh])
 
   if (loading) return <div className="empty" style={{ height: '100vh' }}>Loading...</div>
   if (!user) return <LoginScreen />
