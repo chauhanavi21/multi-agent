@@ -78,7 +78,18 @@ export default function ChatPanel() {
         setLiveEvents((prev) => [...prev, ev])
 
         if (ev.type === 'manager_reply') {
-          setMessages((m) => [...m, { role: 'manager', content: ev.content }])
+          const meta = ev._router
+          let suffix = ''
+          if (meta?.was_plan_limited || meta?.was_downgraded) {
+            suffix = ' (local AI — upgrade for premium)'
+          } else if (meta?.model && !meta.model.includes('llama') && !meta.model.includes('phi3')) {
+            suffix = ' (premium)'
+          }
+          setMessages((m) => [...m, {
+            role: 'manager',
+            content: ev.content,
+            meta: suffix,
+          }])
         }
         // refresh kanban whenever a task changes status
         if (ev.type === 'status' || ev.type === 'plan' || ev.type === 'error') {
@@ -124,6 +135,7 @@ export default function ChatPanel() {
               {m.role === 'user' ? <strong style={{color: 'var(--text)'}}>You</strong> : null}
               {m.role === 'user' && <br />}
               {m.content}
+              {m.meta && <span className="dim" style={{ fontSize: 11, marginLeft: 6 }}>{m.meta}</span>}
             </div>
           </div>
         ))}
