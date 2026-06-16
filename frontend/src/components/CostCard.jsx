@@ -1,5 +1,6 @@
 import { useEffect, useState } from 'react'
 import { api } from '../api/client'
+import BillingUpgrade from './BillingUpgrade'
 
 export default function CostCard() {
   const [data, setData] = useState(null)
@@ -27,6 +28,8 @@ export default function CostCard() {
   const barColor = pct >= 100 ? 'var(--danger)' : pct >= 80 ? 'var(--warn)' : 'var(--accent)'
   const isFree = plan?.plan === 'free'
   const chat = usage?.chat_hourly
+  const stripeOn = usage?.stripe_enabled
+  const billing = usage?.billing
 
   return (
     <div className="card">
@@ -80,6 +83,12 @@ export default function CostCard() {
           <div style={{ fontSize: 16, fontWeight: 500 }}>{cache.total_calls_30d}</div>
         </div>
       </div>
+
+      <BillingUpgrade
+        currentPlan={plan?.plan || 'free'}
+        stripeEnabled={stripeOn}
+        hasSubscription={billing?.has_active_subscription}
+      />
     </div>
   )
 }
