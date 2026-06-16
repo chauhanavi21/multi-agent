@@ -1,5 +1,5 @@
 """Auth routes — signup, login, get current user."""
-from datetime import datetime
+from datetime import datetime, timezone
 from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel, EmailStr, Field
 from sqlalchemy.orm import Session
@@ -27,6 +27,7 @@ class SignupRequest(BaseModel):
     password: str = Field(min_length=6, max_length=100)
     full_name: str = Field(default="", max_length=160)
     company_name: str = Field(min_length=1, max_length=160)
+    accept_terms: bool = False
 
 
 class LoginRequest(BaseModel):
@@ -46,6 +47,11 @@ def signup(payload: SignupRequest, db: Session = Depends(get_db)):
     existing = db.query(User).filter(User.email == payload.email.lower()).first()
     if existing:
         raise HTTPException(409, "Email already registered")
+    if not payload.accept_terms:
+        raise HTTPException(
+            400,
+            "You must accept the Terms of Service, Privacy Policy, and AI disclaimers to create an account.",
+        )
 
     # Create user first (without company), then company, then link.
     user = User(
@@ -54,6 +60,7 @@ def signup(payload: SignupRequest, db: Session = Depends(get_db)):
         password_hash=hash_password(payload.password),
         is_admin=False,
         is_active=True,
+        terms_accepted_at=datetime.now(timezone.utc),
     )
     db.add(user)
     db.flush()    # get user.id without committing
