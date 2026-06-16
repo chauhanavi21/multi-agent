@@ -9,6 +9,7 @@ from datetime import datetime, date
 
 from app.db.models import SessionLocal
 from app.cost import tracing
+from app.billing.context import scheduled_run
 from app.agents.ceo import CEOWorker
 from app.agents.insights import InsightsWorker
 from app.agents.outreach import OutreachWorker
@@ -28,11 +29,12 @@ async def _run_agent(worker, action: str, input: dict, company_id: int,
     final = None
     err = None
     try:
-        async for ev in worker.run(action, input, task_id=f"sched:{job_name}"):
-            if ev.type == "done":
-                final = ev.content
-            elif ev.type == "error":
-                err = ev.content
+        with scheduled_run():
+            async for ev in worker.run(action, input, task_id=f"sched:{job_name}"):
+                if ev.type == "done":
+                    final = ev.content
+                elif ev.type == "error":
+                    err = ev.content
     except Exception as e:
         err = str(e)
     finally:
