@@ -124,3 +124,33 @@ Check which mode is active at `/api/memory/stats`:
   cloud is on). Three companies on scheduler = three Sonnet calls per morning.
   Insights and outreach use `standard` tier. Memory compression uses `cheap`
   tier on every write (~$0.0001 per memory write at most).
+
+## Phase 7 — Subscription plans & rate limits
+
+Plans (`free`, `pro`, `team`) gate cloud AI tiers and monthly budgets. See
+`backend/app/billing/plans.py` and `docs/PRODUCTION_SIZING.md`.
+
+```bash
+python -m app.db.migrate_phase7
+```
+
+- **Free**: local Ollama only, 40 chat messages/hour (Redis).
+- **Pro**: `quality` tier, $8 cloud budget cap, 300 chats/hour.
+- **Team**: `premium` tier, $20 cap, 2000 chats/hour.
+
+Admin can set a company's plan manually. The Cost card shows plan + usage.
+Scheduled jobs are capped to local AI on free plans.
+
+## Phase 8 — Stripe billing & legal
+
+```bash
+python -m app.db.migrate_phase8
+```
+
+- Stripe checkout/portal/webhooks: `backend/app/routes/billing_routes.py`
+- Signup requires `accept_terms: true`
+- Legal banners on login, chat, email send, scheduler
+- Configure Stripe via `backend/.env` — copy from `backend/.env.example`, see
+  `docs/STRIPE_SETUP.md`
+
+`docker compose up -d` starts Postgres + Redis (required for rate limits).
