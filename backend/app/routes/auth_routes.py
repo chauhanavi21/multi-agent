@@ -6,12 +6,20 @@ from sqlalchemy.orm import Session
 
 from app.db.models import get_db
 from app.db.migrate_phase3 import User, Company, CompanyMember
-from app.billing.plans import apply_plan_to_company
+from app.billing.plans import apply_plan_to_company, plan_summary
 from app.auth.security import hash_password, verify_password, create_access_token
 from app.auth.deps import get_current_user
 
 
 router = APIRouter(prefix="/api/auth", tags=["auth"])
+
+
+def _company_payload(c: Company) -> dict:
+    return {
+        "id": c.id,
+        "name": c.name,
+        "plan": plan_summary(getattr(c, "plan", None) or "free"),
+    }
 
 
 class SignupRequest(BaseModel):
@@ -66,8 +74,7 @@ def signup(payload: SignupRequest, db: Session = Depends(get_db)):
         access_token=token,
         user={"id": user.id, "email": user.email, "full_name": user.full_name,
               "is_admin": user.is_admin, "company_id": user.company_id},
-        company={"id": company.id, "name": company.name,
-                 "plan": getattr(company, "plan", "free")},
+        company=_company_payload(company),
     )
 
 
@@ -86,8 +93,7 @@ def login(payload: LoginRequest, db: Session = Depends(get_db)):
     if user.company_id:
         c = db.query(Company).filter(Company.id == user.company_id).first()
         if c:
-            company = {"id": c.id, "name": c.name,
-                       "plan": getattr(c, "plan", "free")}
+            company = _company_payload(c)
 
     token = create_access_token(user.id, user.is_admin, user.company_id)
     return TokenResponse(
@@ -104,8 +110,7 @@ def me(user: User = Depends(get_current_user), db: Session = Depends(get_db)):
     if user.company_id:
         c = db.query(Company).filter(Company.id == user.company_id).first()
         if c:
-            company = {"id": c.id, "name": c.name,
-                       "plan": getattr(c, "plan", "free")}
+            company = _company_payload(c)
     return {
         "user": {
             "id": user.id, "email": user.email, "full_name": user.full_name,
