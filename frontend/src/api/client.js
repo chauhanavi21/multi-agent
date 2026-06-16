@@ -118,6 +118,10 @@ export const api = {
 
   costSummary: () => http('/observability/cost/summary'),
   billingUsage: () => http('/billing/usage'),
+  billingPlans: () => http('/billing/plans'),
+  billingCheckout: (plan) =>
+    http('/billing/checkout', { method: 'POST', body: JSON.stringify({ plan }) }),
+  billingPortal: () => http('/billing/portal', { method: 'POST' }),
   costTimeseries: (days = 14) => http(`/observability/cost/timeseries?days=${days}`),
   recentTraces: (limit = 100) => http(`/observability/traces/recent?limit=${limit}`),
   sessionTraces: (sessionId) => http(`/observability/traces/session/${sessionId}`),
