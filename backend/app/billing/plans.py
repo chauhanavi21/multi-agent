@@ -114,3 +114,15 @@ def resolve_sales_tier(plan: PlanName, action: str) -> Tier:
         "follow_up_now": "standard",
     }
     return defaults.get(action, "standard")
+
+
+def resolve_manager_aggregate_tier(plan: PlanName) -> Tier:
+    """User-facing manager replies use premium cloud on paid plans."""
+    return "quality" if plan in ("pro", "team") else "standard"
+
+
+def cap_tier_for_context(tier: Tier, *, scheduled: bool) -> Tier:
+    """Scheduled jobs stay on local models so cron doesn't burn cloud budget."""
+    if scheduled and tier in ("quality", "premium"):
+        return "standard"
+    return tier
