@@ -1,5 +1,8 @@
 import { useState } from 'react'
 import { useAuth } from './AuthContext'
+import LegalFooter from '../components/LegalFooter'
+import LegalModal from '../components/LegalModal'
+import { SIGNUP_TERMS_LABEL } from '../legal/legalContent'
 
 export default function LoginScreen() {
   const { login, signup } = useAuth()
@@ -8,6 +11,8 @@ export default function LoginScreen() {
   const [password, setPassword] = useState('')
   const [fullName, setFullName] = useState('')
   const [companyName, setCompanyName] = useState('')
+  const [acceptTerms, setAcceptTerms] = useState(false)
+  const [showLegal, setShowLegal] = useState(false)
   const [busy, setBusy] = useState(false)
   const [err, setErr] = useState(null)
 
@@ -19,7 +24,14 @@ export default function LoginScreen() {
       if (mode === 'login') {
         await login(email, password)
       } else {
-        await signup({ email, password, full_name: fullName, company_name: companyName })
+        if (!acceptTerms) {
+          setErr('You must accept the Terms of Service and AI disclosures to sign up.')
+          return
+        }
+        await signup({
+          email, password, full_name: fullName, company_name: companyName,
+          accept_terms: true,
+        })
       }
     } catch (e) {
       setErr(e.message)
@@ -86,6 +98,21 @@ export default function LoginScreen() {
               autoComplete={mode === 'login' ? 'current-password' : 'new-password'}
             />
           </div>
+          {mode === 'signup' && (
+            <label className="legal-checkbox">
+              <input
+                type="checkbox"
+                checked={acceptTerms}
+                onChange={(e) => setAcceptTerms(e.target.checked)}
+              />
+              <span>
+                {SIGNUP_TERMS_LABEL}{' '}
+                <button type="button" className="legal-link inline" onClick={() => setShowLegal(true)}>
+                  Read disclosures
+                </button>
+              </span>
+            </label>
+          )}
           {err && <div className="login-err">{err}</div>}
           <button type="submit" className="primary" disabled={busy}
                   style={{ width: '100%', marginTop: 6 }}>
@@ -97,10 +124,12 @@ export default function LoginScreen() {
           {mode === 'login' ? (
             <>Default admin: <code>boss@local.dev</code> / <code>bosspass</code></>
           ) : (
-            <>Signing up creates your company with the fixed agent team.</>
+            <>Free tier uses local AI only. You are responsible for all outbound messages.</>
           )}
         </div>
+        <LegalFooter compact />
       </div>
+      {showLegal && <LegalModal onClose={() => setShowLegal(false)} />}
     </div>
   )
 }
