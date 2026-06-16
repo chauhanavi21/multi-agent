@@ -23,10 +23,49 @@ async function http(path, opts = {}) {
   }
   if (!res.ok) {
     let detail
-    try { detail = (await res.json()).detail } catch {}
+    try {
+      const body = await res.json()
+      detail = body.detail
+      if (Array.isArray(detail)) detail = detail.map((d) => d.msg || d).join(', ')
+    } catch {}
     throw new Error(detail || `${res.status} ${res.statusText}`)
   }
   return res.status === 204 ? null : res.json()
+}
+
+async function* streamSSE(path, payload) {
+  const res = await fetch(`${BASE}${path}`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json', ...authHeaders() },
+    body: JSON.stringify(payload),
+  })
+  if (res.status === 401) { setToken(null); window.location.reload(); throw new Error('Unauthorized') }
+  if (!res.ok) {
+    let detail
+    try {
+      const body = await res.json()
+      detail = body.detail
+      if (Array.isArray(detail)) detail = detail.map((d) => d.msg || d).join(', ')
+    } catch {}
+    throw new Error(detail || `${res.status} ${res.statusText}`)
+  }
+  const reader = res.body.getReader()
+  const decoder = new TextDecoder()
+  let buffer = ''
+  while (true) {
+    const { value, done } = await reader.read()
+    if (done) break
+    buffer += decoder.decode(value, { stream: true })
+    const lines = buffer.split('\n')
+    buffer = lines.pop()
+    for (const line of lines) {
+      const trimmed = line.trim()
+      if (!trimmed.startsWith('data:')) continue
+      const data = trimmed.slice(5).trim()
+      if (!data) continue
+      try { yield JSON.parse(data) } catch {}
+    }
+  }
 }
 
 export const api = {
@@ -128,30 +167,7 @@ export const api = {
   cacheStats: () => http('/observability/cache/stats'),
   clearCache: () => http('/observability/cache', { method: 'DELETE' }),
 
-  async *streamAgent(path, payload) {
-    const res = await fetch(`${BASE}${path}`, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json', ...authHeaders() },
-      body: JSON.stringify(payload),
-    })
-    if (res.status === 401) { setToken(null); window.location.reload(); throw new Error('Unauthorized') }
-    if (!res.ok) throw new Error(`${res.status} ${res.statusText}`)
-    const reader = res.body.getReader()
-    const decoder = new TextDecoder()
-    let buffer = ''
-    while (true) {
-      const { value, done } = await reader.read()
-      if (done) break
-      buffer += decoder.decode(value, { stream: true })
-      const lines = buffer.split('\n')
-      buffer = lines.pop()
-      for (const line of lines) {
-        const trimmed = line.trim()
-        if (!trimmed.startsWith('data:')) continue
-        const data = trimmed.slice(5).trim()
-        if (!data) continue
-        try { yield JSON.parse(data) } catch {}
-      }
-    }
-  },
+  streamAgent: (path, payload) => streamSSE(path, payload),
+  streamChat: (sessionId, message) =>
+    streamSSE('/chat/message', { session_id: sessionId, message }),
 }

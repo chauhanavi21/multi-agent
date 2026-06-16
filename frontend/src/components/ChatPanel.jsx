@@ -1,36 +1,9 @@
 import { useEffect, useRef, useState } from 'react'
+import { api } from '../api/client'
 import AgentBadge from './AgentBadge'
 import TaskKanban from './TaskKanban'
 import LegalBanner from './LegalBanner'
 import { CHAT_BANNER } from '../legal/legalContent'
-
-const BASE = 'http://localhost:8000/api'
-
-async function* streamSSE(url, body) {
-  const res = await fetch(url, {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify(body),
-  })
-  if (!res.ok) throw new Error(`${res.status} ${res.statusText}`)
-  const reader = res.body.getReader()
-  const decoder = new TextDecoder()
-  let buf = ''
-  while (true) {
-    const { value, done } = await reader.read()
-    if (done) break
-    buf += decoder.decode(value, { stream: true })
-    const lines = buf.split('\n')
-    buf = lines.pop()
-    for (const line of lines) {
-      const t = line.trim()
-      if (!t.startsWith('data:')) continue
-      const data = t.slice(5).trim()
-      if (!data) continue
-      try { yield JSON.parse(data) } catch {}
-    }
-  }
-}
 
 export default function ChatPanel() {
   const [sessionId, setSessionId] = useState(null)
@@ -39,17 +12,15 @@ export default function ChatPanel() {
   const [draft, setDraft] = useState('')
   const [streaming, setStreaming] = useState(false)
   const [liveEvents, setLiveEvents] = useState([])
+  const [sessionErr, setSessionErr] = useState(null)
   const scrollRef = useRef(null)
 
   useEffect(() => {
-    // start with a fresh session
-    fetch(`${BASE}/chat/sessions`, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ title: 'New conversation' }),
-    })
-      .then((r) => r.json())
-      .then((s) => setSessionId(s.id))
+    let alive = true
+    api.createSession('New conversation')
+      .then((s) => { if (alive) setSessionId(s.id) })
+      .catch((e) => { if (alive) setSessionErr(e.message) })
+    return () => { alive = false }
   }, [])
 
   useEffect(() => {
@@ -60,8 +31,9 @@ export default function ChatPanel() {
 
   async function refreshTasks() {
     if (!sessionId) return
-    const r = await fetch(`${BASE}/chat/sessions/${sessionId}/tasks`)
-    setTasks(await r.json())
+    try {
+      setTasks(await api.sessionTasks(sessionId))
+    } catch { /* ignore */ }
   }
 
   async function send() {
@@ -73,10 +45,7 @@ export default function ChatPanel() {
     setLiveEvents([])
 
     try {
-      for await (const ev of streamSSE(`${BASE}/chat/message`, {
-        session_id: sessionId,
-        message: userMsg,
-      })) {
+      for await (const ev of api.streamChat(sessionId, userMsg)) {
         setLiveEvents((prev) => [...prev, ev])
 
         if (ev.type === 'manager_reply') {
@@ -93,18 +62,15 @@ export default function ChatPanel() {
             meta: suffix,
           }])
         }
-        // refresh kanban whenever a task changes status
         if (ev.type === 'status' || ev.type === 'plan' || ev.type === 'error') {
           refreshTasks()
         }
       }
-      // final refresh
       refreshTasks()
     } catch (e) {
       setMessages((m) => [...m, { role: 'system', content: `Error: ${e.message}` }])
     } finally {
       setStreaming(false)
-      // keep last few events visible briefly, then clear
       setTimeout(() => setLiveEvents([]), 1500)
     }
   }
@@ -123,6 +89,10 @@ export default function ChatPanel() {
         <div className="card-title" style={{ margin: 0 }}>Talk to the team</div>
         <span className="dim">session #{sessionId ?? '...'}</span>
       </div>
+
+      {sessionErr && (
+        <div className="login-err" style={{ margin: '8px 12px' }}>{sessionErr}</div>
+      )}
 
       <div className="chat-body" ref={scrollRef}>
         {messages.length === 0 && !streaming && (
@@ -168,7 +138,7 @@ export default function ChatPanel() {
           disabled={streaming || !sessionId}
           rows={2}
         />
-        <button onClick={send} disabled={streaming || !draft.trim()} className="primary">
+        <button onClick={send} disabled={streaming || !draft.trim() || !sessionId} className="primary">
           {streaming ? '...' : 'Send'}
         </button>
       </div>
