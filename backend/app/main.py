@@ -35,8 +35,10 @@ from app.agents import registry
 from app.auth.deps import get_current_user, get_company_context, CompanyContext
 from app.db.migrate_phase3 import User
 from app.routes import auth_routes, company_routes, admin_routes
-from app.routes import observability_routes, memory_routes, scheduler_routes
+from app.routes import observability_routes, memory_routes, scheduler_routes, billing_routes
 from app.scheduler import runner as sched_runner
+from app.billing.plans import get_company_plan
+from app.billing.limits import check_chat_allowed
 
 
 @asynccontextmanager
@@ -62,6 +64,7 @@ app.include_router(admin_routes.router)
 app.include_router(observability_routes.router)
 app.include_router(memory_routes.router)
 app.include_router(scheduler_routes.router)
+app.include_router(billing_routes.router)
 
 
 class DraftEmailRequest(BaseModel): lead_id: int
@@ -340,6 +343,8 @@ async def chat_message(payload: ChatMessageRequest,
                        db: Session = Depends(get_db)):
     if not _verify_session_in_company(db, payload.session_id, ctx.company_id):
         raise HTTPException(404, "session not found")
+    plan = get_company_plan(db, ctx.company_id)
+    check_chat_allowed(ctx.company_id, plan)
     company_id = ctx.company_id
     user_id = ctx.user.id
 
