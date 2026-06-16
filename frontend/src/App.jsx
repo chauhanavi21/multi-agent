@@ -13,10 +13,25 @@ import ObservabilityPanel from './components/ObservabilityPanel'
 import MemoryPanel from './components/MemoryPanel'
 import DashboardPanel from './components/DashboardPanel'
 import CostCard from './components/CostCard'
+import LegalFooter from './components/LegalFooter'
+import LegalBanner from './components/LegalBanner'
+import { SHORT_AI_WARNING } from './legal/legalContent'
 
 export default function App() {
   const { user, loading } = useAuth()
   const [view, setView] = useState('workspace')
+  const [billingNotice, setBillingNotice] = useState(null)
+
+  useEffect(() => {
+    const params = new URLSearchParams(window.location.search)
+    if (params.get('billing') === 'success') {
+      setBillingNotice('Payment received. Your plan will update shortly — refresh if needed.')
+      window.history.replaceState({}, '', window.location.pathname)
+    } else if (params.get('billing') === 'cancel') {
+      setBillingNotice('Checkout cancelled. No charge was made.')
+      window.history.replaceState({}, '', window.location.pathname)
+    }
+  }, [])
 
   if (loading) return <div className="empty" style={{ height: '100vh' }}>Loading...</div>
   if (!user) return <LoginScreen />
@@ -33,7 +48,14 @@ export default function App() {
   return (
     <div className="appshell">
       <TopBar view={effectiveView} onChangeView={setView} />
-      {body}
+      {billingNotice && (
+        <LegalBanner text={billingNotice} variant="info" />
+      )}
+      <LegalBanner text={SHORT_AI_WARNING} />
+      <div className="appshell-body">
+        {body}
+      </div>
+      <LegalFooter />
     </div>
   )
 }
