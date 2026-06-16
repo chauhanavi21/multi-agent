@@ -117,6 +117,7 @@ export const api = {
       method: 'POST', body: JSON.stringify({ to_stage: toStage, reason }) }),
 
   costSummary: () => http('/observability/cost/summary'),
+  billingUsage: () => http('/billing/usage'),
   costTimeseries: (days = 14) => http(`/observability/cost/timeseries?days=${days}`),
   recentTraces: (limit = 100) => http(`/observability/traces/recent?limit=${limit}`),
   sessionTraces: (sessionId) => http(`/observability/traces/session/${sessionId}`),
