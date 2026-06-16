@@ -58,6 +58,13 @@ class Settings(BaseSettings):
     memory_min_similarity: float = 0.55
     memory_top_k_for_retrieval: int = 5
 
+    # Stripe billing (optional — leave empty for local-only billing via admin)
+    stripe_secret_key: str = ""
+    stripe_webhook_secret: str = ""
+    stripe_price_id_pro: str = ""
+    stripe_price_id_team: str = ""
+    frontend_base_url: str = "http://localhost:5173"
+
     class Config:
         env_file = ".env"
 
