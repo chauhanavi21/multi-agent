@@ -25,7 +25,8 @@ from app.cost import cache as cache_mod
 from app.cost import pricing
 from app.cost import budget as budget_mod
 from app.cost import tracing
-from app.billing.plans import get_company_plan, plan_allows_tier
+from app.billing.plans import get_company_plan, plan_allows_tier, cap_tier_for_context
+from app.billing.context import is_scheduled_run
 from app.db.models import SessionLocal
 
 log = logging.getLogger(__name__)
@@ -177,6 +178,7 @@ async def call_llm(system: str, user: str, tier: Tier = "standard",
     try:
         status = budget_mod.get_status(db, company_id)
         plan = get_company_plan(db, company_id)
+        tier = cap_tier_for_context(tier, scheduled=is_scheduled_run())
         plan_allows = plan_allows_tier(plan, tier)
         provider = _company_provider(company_id)
         can_cloud = status.can_use_cloud and not force_local
