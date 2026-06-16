@@ -68,6 +68,16 @@ most calls hit **cheap/standard** (Ollama). Premium (Haiku) only on **Pro/Team**
 | **pro** | $8/mo cap | Haiku (quality tier) | $39/mo |
 | **team** | $20/mo cap | Haiku + Sonnet (premium) | $99/mo |
 
+### Rate limits (per company, per hour)
+
+| Plan | Chat messages/hour |
+|------|-------------------|
+| free | 40 |
+| pro | 300 |
+| team | 2000 |
+
+Scheduled jobs (CEO, outreach, etc.) always use **local** models so cron does not burn cloud budget.
+
 Router rules:
 
 1. `cheap` / `standard` → always Ollama (no API bill).
