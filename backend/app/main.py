@@ -25,6 +25,7 @@ from app.db import model_extensions_p4    # noqa: F401
 from app.db import model_extensions_p5    # noqa: F401
 from app.db import model_extensions_p6    # noqa: F401
 from app.db import model_extensions_p7    # noqa: F401
+from app.db import model_extensions_p8    # noqa: F401
 from app.db.models import get_db, Lead
 from app.db.migrate_phase2 import ChatSession, AgentMessage
 from app.tools import lead_tools, email_tools, crm_tools, task_queue, lead_pipeline, sms_tools
