@@ -1,4 +1,5 @@
 import { useState, useEffect } from 'react'
+import { EMAIL_SEND_WARNING } from '../legal/legalContent'
 
 export default function EmailEditor({ draft, onSend, onUpdate }) {
   const [subject, setSubject] = useState(draft.subject)
@@ -26,6 +27,7 @@ export default function EmailEditor({ draft, onSend, onUpdate }) {
   }
 
   async function send() {
+    if (!window.confirm(`${EMAIL_SEND_WARNING}\n\nSend this email now?`)) return
     if (dirty) await save()
     setSending(true)
     try {
@@ -58,6 +60,9 @@ export default function EmailEditor({ draft, onSend, onUpdate }) {
 
       <div className="field">
         <label className="field-label">Body</label>
+        <p className="dim" style={{ fontSize: 11, margin: '0 0 6px' }}>
+          AI-generated — edit and verify before sending. You accept full responsibility for this message.
+        </p>
         <textarea
           value={body}
           disabled={isSent}

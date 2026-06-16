@@ -1,5 +1,9 @@
 import { useEffect, useState } from 'react'
 import { api } from '../api/client'
+import LegalBanner from './LegalBanner'
+
+const SCHEDULER_DISCLAIMER =
+  'Scheduled jobs run automatically. You are responsible for reviewing outreach, SMS, and plans before they reach real people.'
 
 const JOB_DESCRIPTIONS = {
   ceo_daily:      'CEO writes today\'s priorities (reviews yesterday)',
@@ -61,6 +65,7 @@ export default function DashboardPanel() {
 
   return (
     <div className="obs">
+      <LegalBanner text={SCHEDULER_DISCLAIMER} />
       <div className="obs-header">
         <h2 style={{ margin: 0, fontSize: 18 }}>Dashboard</h2>
         <button onClick={load}>Refresh</button>

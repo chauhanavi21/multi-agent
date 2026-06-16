@@ -1,6 +1,8 @@
 import { useEffect, useRef, useState } from 'react'
 import AgentBadge from './AgentBadge'
 import TaskKanban from './TaskKanban'
+import LegalBanner from './LegalBanner'
+import { CHAT_BANNER } from '../legal/legalContent'
 
 const BASE = 'http://localhost:8000/api'
 
@@ -116,6 +118,7 @@ export default function ChatPanel() {
 
   return (
     <div className="chat">
+      <LegalBanner text={CHAT_BANNER} />
       <div className="chat-header">
         <div className="card-title" style={{ margin: 0 }}>Talk to the team</div>
         <span className="dim">session #{sessionId ?? '...'}</span>
