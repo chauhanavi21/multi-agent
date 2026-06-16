@@ -16,6 +16,7 @@ from app.db.models import SessionLocal
 from app.db.migrate_phase2 import ChatSession, AgentMessage
 from app.agents.base import WorkerEvent, route_llm, parse_json_lenient
 from app.agents import registry
+from app.billing.plans import get_company_plan, resolve_manager_aggregate_tier
 from app.tools import task_queue
 from app.cost import tracing
 
@@ -260,10 +261,18 @@ async def run_manager(session_id: int, user_message: str,
             "reply_hint": reply_hint,
             "task_outputs": final_outputs or {},
         }
+        agg_tier = "standard"
+        db_plan = SessionLocal()
+        try:
+            plan = get_company_plan(db_plan, company_id)
+            agg_tier = resolve_manager_aggregate_tier(plan)
+        finally:
+            db_plan.close()
+
         agg_result = await route_llm(
             AGGREGATE_SYSTEM_PROMPT,
             json.dumps(summary_input, default=str)[:8000],
-            tier="quality", agent_name="manager",
+            tier=agg_tier, agent_name="manager",
         )
         reply = agg_result.content.strip()
 
@@ -283,6 +292,9 @@ async def run_manager(session_id: int, user_message: str,
         yield {"type": "manager_reply", "agent": "manager", "content": reply,
                "_router": {"model": agg_result.model_used,
                            "cost_usd": agg_result.cost_usd,
-                           "cache_hit": agg_result.was_cache_hit}}
+                           "cache_hit": agg_result.was_cache_hit,
+                           "was_downgraded": agg_result.was_downgraded,
+                           "was_plan_limited": agg_result.was_plan_limited,
+                           "tier_requested": agg_tier}}
     finally:
         _current.reset(top_token)
