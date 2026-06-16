@@ -29,6 +29,14 @@ export default function TopBar({ view, onChangeView }) {
       </div>
 
       <div className="topbar-right">
+        {company?.plan && (
+          <span className="admin-pill" style={{ marginRight: 10, fontSize: 10 }}
+                title={company.plan.ai_mode === 'local_only'
+                  ? 'Local AI only — upgrade for Claude'
+                  : 'Local + premium cloud AI'}>
+            {company.plan.display_name}
+          </span>
+        )}
         <button className="userchip" onClick={() => setOpen((v) => !v)}>
           <span className="user-avatar">{(user?.full_name || user?.email || '?')[0].toUpperCase()}</span>
           <span className="user-name">{user?.full_name || user?.email}</span>
