@@ -25,6 +25,7 @@ from app.cost import cache as cache_mod
 from app.cost import pricing
 from app.cost import budget as budget_mod
 from app.cost import tracing
+from app.billing.plans import get_company_plan, plan_allows_tier
 from app.db.models import SessionLocal
 
 log = logging.getLogger(__name__)
@@ -44,6 +45,7 @@ class RouterResult:
     latency_ms: int
     was_cache_hit: bool
     was_downgraded: bool
+    was_plan_limited: bool       # True if subscription plan blocked cloud tier
     trace_span_id: Optional[int]
     provider_used: str = "local"   # 'local' | 'anthropic' | 'bedrock'
 
@@ -65,7 +67,7 @@ def _company_provider(company_id: int) -> Provider:
 
 
 def _pick_model(tier: Tier, can_use_cloud: bool, must_downgrade: bool,
-                provider: Provider) -> tuple[str, bool, str]:
+                provider: Provider, plan_allows: bool) -> tuple[str, bool, str]:
     """Returns (model_name, was_downgraded, provider_used)."""
     if tier == "cheap":
         return settings.ollama_cheap_model, False, "local"
@@ -73,6 +75,8 @@ def _pick_model(tier: Tier, can_use_cloud: bool, must_downgrade: bool,
         return settings.ollama_model, False, "local"
 
     wants_cloud = tier in ("quality", "premium")
+    if wants_cloud and not plan_allows:
+        return settings.ollama_model, True, "local"
     if wants_cloud and can_use_cloud and not must_downgrade:
         if provider == "bedrock":
             model = (settings.bedrock_haiku_model_id if tier == "quality"
@@ -165,16 +169,20 @@ async def call_llm(system: str, user: str, tier: Tier = "standard",
             input_tokens=in_tok, output_tokens=out_tok,
             cost_usd=0.0, latency_ms=0,
             was_cache_hit=False, was_downgraded=False,
+            was_plan_limited=False,
             trace_span_id=None, provider_used="local",
         )
 
     db = SessionLocal()
     try:
         status = budget_mod.get_status(db, company_id)
+        plan = get_company_plan(db, company_id)
+        plan_allows = plan_allows_tier(plan, tier)
         provider = _company_provider(company_id)
         can_cloud = status.can_use_cloud and not force_local
         model, downgraded, provider_used = _pick_model(
-            tier, can_cloud, status.must_downgrade, provider)
+            tier, can_cloud, status.must_downgrade, provider, plan_allows)
+        plan_limited = tier in ("quality", "premium") and not plan_allows
 
         span_id = None
         if ctx:
@@ -202,6 +210,7 @@ async def call_llm(system: str, user: str, tier: Tier = "standard",
                 input_tokens=0, output_tokens=0,
                 cost_usd=0.0, latency_ms=latency_ms,
                 was_cache_hit=True, was_downgraded=False,
+                was_plan_limited=False,
                 trace_span_id=span_id,
                 provider_used="cache",
             )
@@ -244,6 +253,7 @@ async def call_llm(system: str, user: str, tier: Tier = "standard",
             input_tokens=in_tok, output_tokens=out_tok,
             cost_usd=cost, latency_ms=latency_ms,
             was_cache_hit=False, was_downgraded=downgraded,
+            was_plan_limited=plan_limited,
             trace_span_id=span_id, provider_used=provider_used,
         )
     finally:

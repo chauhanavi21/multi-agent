@@ -66,6 +66,56 @@ export const api = {
     http(`/admin/companies/${companyId}/cloud_provider`, {
       method: 'PUT', body: JSON.stringify({ cloud_provider: provider }) }),
 
+  // ---- Phase 6: Admin (ICP + scheduler toggle) ----
+  adminSetIcpProfile: (companyId, icpProfile) =>
+    http(`/admin/companies/${companyId}/icp_profile`, {
+      method: 'PUT', body: JSON.stringify({ icp_profile: icpProfile }) }),
+  adminSetScheduler: (companyId, enabled) =>
+    http(`/admin/companies/${companyId}/scheduler`, {
+      method: 'PUT', body: JSON.stringify({ enabled }) }),
+  adminSetPlan: (companyId, plan) =>
+    http(`/admin/companies/${companyId}/plan`, {
+      method: 'PUT', body: JSON.stringify({ plan }) }),
+  adminPlans: () => http('/admin/plans'),
+
+  // ---- Phase 6: Memory ----
+  memoryStats: () => http('/memory/stats'),
+  memoryRecent: (limit = 100, kind = null) => {
+    const q = new URLSearchParams({ limit: String(limit) })
+    if (kind) q.set('kind', kind)
+    return http(`/memory/recent?${q.toString()}`)
+  },
+  memoryRetrieve: (query, k = 10, kinds = null, tags = null, min_score = 0.45) =>
+    http('/memory/retrieve', {
+      method: 'POST',
+      body: JSON.stringify({ query, k, kinds, tags, min_score }),
+    }),
+  memoryDelete: (id) => http(`/memory/${id}`, { method: 'DELETE' }),
+  memorySetImportance: (id, importance) =>
+    http(`/memory/${id}/importance`, {
+      method: 'PUT', body: JSON.stringify({ importance }) }),
+
+  // ---- Phase 6: Scheduler ----
+  schedulerJobs: () => http('/scheduler/jobs'),
+  schedulerUpsertJob: (jobName, cronExpr, enabled) =>
+    http(`/scheduler/jobs/${jobName}`, {
+      method: 'PUT', body: JSON.stringify({ cron_expr: cronExpr, enabled }) }),
+  schedulerRunNow: (jobName) =>
+    http(`/scheduler/jobs/${jobName}/run_now`, { method: 'POST' }),
+  schedulerActive: () => http('/scheduler/active'),
+
+  // ---- Phase 6: Pipeline & content ----
+  dailyPlan: (date = null) =>
+    http(`/daily_plan${date ? `?plan_date=${date}` : ''}`),
+  reelScripts: (limit = 20) => http(`/reel_scripts?limit=${limit}`),
+  smsOutbox: (limit = 50) => http(`/sms?limit=${limit}`),
+  leadStageHistory: (leadId) => http(`/leads/${leadId}/stage_history`),
+  qualifyLead: (leadId) =>
+    http(`/agents/sales/qualify_lead/${leadId}`, { method: 'POST' }),
+  transitionStage: (leadId, toStage, reason = null) =>
+    http(`/agents/sales/transition_stage/${leadId}`, {
+      method: 'POST', body: JSON.stringify({ to_stage: toStage, reason }) }),
+
   costSummary: () => http('/observability/cost/summary'),
   costTimeseries: (days = 14) => http(`/observability/cost/timeseries?days=${days}`),
   recentTraces: (limit = 100) => http(`/observability/traces/recent?limit=${limit}`),

@@ -7,6 +7,7 @@ from sqlalchemy.orm import Session
 from app.db.models import get_db
 from app.auth.deps import get_company_context, CompanyContext
 from app.cost import tracing, cache, budget
+from app.billing.plans import get_company_plan, plan_summary
 
 
 router = APIRouter(prefix="/api/observability", tags=["observability"])
@@ -35,6 +36,7 @@ def cost_summary(ctx: CompanyContext = Depends(get_company_context),
     from app.db.migrate_phase4 import UsageRecord
 
     status = budget.get_status(db, ctx.company_id)
+    plan = get_company_plan(db, ctx.company_id)
 
     # Last 30 days
     since = datetime.now(timezone.utc) - timedelta(days=30)
@@ -72,6 +74,7 @@ def cost_summary(ctx: CompanyContext = Depends(get_company_context),
     hit_rate = (cache_hits / total_calls * 100.0) if total_calls else 0.0
 
     return {
+        "plan": plan_summary(plan),
         "budget": {
             "spent_usd": status.spent_usd,
             "budget_usd": status.budget_usd,

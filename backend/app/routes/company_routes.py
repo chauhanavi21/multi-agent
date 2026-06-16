@@ -6,6 +6,7 @@ from app.db.models import get_db
 from app.db.org_chart import get_locked_template
 from app.auth.deps import get_company_context, CompanyContext
 from app.agents import registry
+from app.billing.plans import plan_summary
 
 
 router = APIRouter(prefix="/api/company", tags=["company"])
@@ -19,6 +20,7 @@ def my_company(ctx: CompanyContext = Depends(get_company_context)):
     return {
         "id": company.id,
         "name": company.name,
+        "plan": plan_summary(getattr(company, "plan", None) or "free"),
         "org_chart": template,
         "is_locked": True,    # users cannot edit
         "is_admin_override": ctx.is_admin_override,

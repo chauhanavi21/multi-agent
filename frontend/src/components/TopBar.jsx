@@ -15,6 +15,10 @@ export default function TopBar({ view, onChangeView }) {
         <div className="topbar-tabs">
           <button className={view === 'workspace' ? 'tabchip tabchip-active' : 'tabchip'}
                   onClick={() => onChangeView('workspace')}>Workspace</button>
+          <button className={view === 'dashboard' ? 'tabchip tabchip-active' : 'tabchip'}
+                  onClick={() => onChangeView('dashboard')}>Dashboard</button>
+          <button className={view === 'memory' ? 'tabchip tabchip-active' : 'tabchip'}
+                  onClick={() => onChangeView('memory')}>Memory</button>
           <button className={view === 'observability' ? 'tabchip tabchip-active' : 'tabchip'}
                   onClick={() => onChangeView('observability')}>Observability</button>
           {user?.is_admin && (
